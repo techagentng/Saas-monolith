@@ -14,3 +14,7 @@ func (h *BcryptHasher) Hash(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), h.cost)
 	return string(hash), err
 }
+
+func (h *BcryptHasher) Verify(password, encodedHash string) error {
+	return bcrypt.CompareHashAndPassword([]byte(encodedHash), []byte(password))
+}
