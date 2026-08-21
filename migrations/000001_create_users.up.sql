@@ -1,0 +1,10 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    email VARCHAR(320) NOT NULL,
+    password_hash TEXT NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT users_email_unique UNIQUE (email),
+    CONSTRAINT users_status_valid CHECK (status IN ('ACTIVE', 'DISABLED'))
+);
