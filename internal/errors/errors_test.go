@@ -66,6 +66,21 @@ func TestAppErrorConstructionAndWrapping(t *testing.T) {
 	}
 }
 
+func TestErrorsAsFindsAppErrorThroughThreeWrappingLayers(t *testing.T) {
+	appErr := apperrors.New(apperrors.CodeTenantNotFound, "internal context", nil)
+	wrapped := fmt.Errorf("repository context: %w", appErr)
+	wrapped = fmt.Errorf("service context: %w", wrapped)
+	wrapped = fmt.Errorf("handler context: %w", wrapped)
+
+	var identified *apperrors.AppError
+	if !errors.As(wrapped, &identified) {
+		t.Fatal("errors.As did not identify the application error through three wrapping layers")
+	}
+	if identified.Code != apperrors.CodeTenantNotFound {
+		t.Fatalf("identified code = %q, want %q", identified.Code, apperrors.CodeTenantNotFound)
+	}
+}
+
 func TestMapKnownErrorsUsesSafePublicMessages(t *testing.T) {
 	appErr := apperrors.New(apperrors.CodeUserNotFound, "user secret and tenant identifier", errors.New("SQL: SELECT * FROM users"))
 	result := apperrors.Map(fmt.Errorf("service context: %w", appErr))
@@ -130,6 +145,20 @@ func TestMapUnexpectedErrorUsesInternalError(t *testing.T) {
 	}
 	if strings.Contains(result.Message, "super-secret") || strings.Contains(result.Message, "private") {
 		t.Fatalf("unexpected error leaked: %q", result.Message)
+	}
+}
+
+func TestMapNilUsesInternalErrorFallback(t *testing.T) {
+	result := apperrors.Map(nil)
+
+	if result.Status != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", result.Status, http.StatusInternalServerError)
+	}
+	if result.Code != apperrors.CodeInternalError {
+		t.Fatalf("code = %q, want %q", result.Code, apperrors.CodeInternalError)
+	}
+	if result.Message != "An unexpected error occurred." {
+		t.Fatalf("message = %q, want centralized generic safe message", result.Message)
 	}
 }
 
