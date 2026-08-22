@@ -1,7 +1,55 @@
 package main
 
-import "fmt"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/joho/godotenv"
+	"github.com/techagentng/saas-monolith/internal/app"
+	"github.com/techagentng/saas-monolith/internal/config"
+)
 
 func main() {
-	fmt.Println("SaaS booking service")
+	if err := run(); err != nil {
+		log.Printf("server stopped: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	// Best effort: a missing .env is normal outside development, and real
+	// environment variables always take precedence over the file.
+	_ = godotenv.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		return fmt.Errorf("loading configuration: %w", err)
+	}
+	log.Printf("starting API environment=%s host=%s port=%d postgres_host=%s postgres_port=%d database=%s", cfg.Env, cfg.Host, cfg.Port, cfg.PostgresHost, cfg.PostgresPort, cfg.PostgresDB)
+	application, err := app.New(context.Background(), cfg)
+	if err != nil {
+		return fmt.Errorf("initializing application: %w", err)
+	}
+	defer application.Close()
+	serverErrors := make(chan error, 1)
+	go func() { serverErrors <- application.Server.ListenAndServe() }()
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case err := <-serverErrors:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-signals:
+		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return application.Server.Shutdown(shutdownContext)
+	}
 }

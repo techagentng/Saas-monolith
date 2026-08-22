@@ -13,9 +13,12 @@ import (
 )
 
 func TestPostgresUserRepositoryMigrationAndEmailUniqueness(t *testing.T) {
-	databaseURL := os.Getenv("DATABASE_URL")
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
-		t.Skip("DATABASE_URL is not configured")
+		databaseURL = os.Getenv("DATABASE_URL")
+	}
+	if databaseURL == "" {
+		t.Skip("TEST_DATABASE_URL or DATABASE_URL is not configured")
 	}
 
 	db, err := sql.Open("pgx", databaseURL)
