@@ -12,6 +12,7 @@ const (
 type Tenant struct {
 	ID        string
 	Name      string
+	Slug      string
 	Status    Status
 	CreatedAt time.Time
 	UpdatedAt time.Time

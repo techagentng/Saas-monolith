@@ -46,6 +46,8 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	membershipService := tenantservice.NewMembershipService(users, tenants, memberships)
 	contextService := tenantservice.NewTenantContextService(tenants, memberships)
 	membershipHandler := tenanthandler.NewMembershipHandler(membershipService)
+	tenantCreationService := tenantservice.NewTenantService(db, users)
+	tenantHandler := tenanthandler.NewTenantHandler(tenantCreationService)
 
 	roles := authzrepository.NewPostgresRoleRepository(db)
 	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
@@ -68,6 +70,12 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	tenantMiddleware := tenant.Middleware{Resolver: contextService}
 	api.Handle("POST /api/v1/auth/logout", authMiddleware.Wrap(http.HandlerFunc(authenticationHandler.Logout)))
 	api.Handle("GET /api/v1/tenants/{tenantID}/context", authMiddleware.Wrap(tenantContextHandler(contextService)))
+
+	// Tenant creation (Feature 2): any authenticated user may create a
+	// tenant and becomes its BUSINESS_OWNER. No tenant context or tenant
+	// permission middleware applies here — there is no tenant yet against
+	// which either could be evaluated.
+	api.Handle("POST /api/v1/tenants", authMiddleware.Wrap(http.HandlerFunc(tenantHandler.Create)))
 
 	// Route authorization matrix (Feature 6):
 	//   POST   /api/v1/tenants/{tenantID}/members                 TENANT  user.create

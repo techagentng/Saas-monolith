@@ -331,6 +331,10 @@ func (*fakeAuthzUserRepository) FindByEmail(context.Context, string) (*identitym
 
 type fakeAuthzTenantRepository struct{}
 
+func (*fakeAuthzTenantRepository) Create(_ context.Context, tenant *tenantmodel.Tenant) (*tenantmodel.Tenant, error) {
+	return tenant, nil
+}
+
 func (*fakeAuthzTenantRepository) FindByID(_ context.Context, id string) (*tenantmodel.Tenant, error) {
 	return &tenantmodel.Tenant{ID: id, Status: tenantmodel.StatusActive}, nil
 }

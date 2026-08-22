@@ -73,6 +73,10 @@ type tenantRepositoryFake struct {
 	findErr error
 }
 
+func (r *tenantRepositoryFake) Create(_ context.Context, tenant *model.Tenant) (*model.Tenant, error) {
+	return tenant, nil
+}
+
 func (r *tenantRepositoryFake) FindByID(context.Context, string) (*model.Tenant, error) {
 	if r.findErr != nil {
 		return nil, fmt.Errorf("find tenant: %w", r.findErr)

@@ -12,9 +12,9 @@ import (
 	"github.com/techagentng/saas-monolith/internal/tenant/model"
 )
 
-type PostgresMembershipRepository struct{ db *sql.DB }
+type PostgresMembershipRepository struct{ db dbtx }
 
-func NewPostgresMembershipRepository(db *sql.DB) *PostgresMembershipRepository {
+func NewPostgresMembershipRepository(db dbtx) *PostgresMembershipRepository {
 	return &PostgresMembershipRepository{db: db}
 }
 

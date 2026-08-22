@@ -73,6 +73,10 @@ func (*userRepoFake) FindByEmail(context.Context, string) (*identitymodel.User, 
 
 type tenantRepoFake struct{}
 
+func (*tenantRepoFake) Create(_ context.Context, tenant *tenantmodel.Tenant) (*tenantmodel.Tenant, error) {
+	return tenant, nil
+}
+
 func (*tenantRepoFake) FindByID(context.Context, string) (*tenantmodel.Tenant, error) {
 	return &tenantmodel.Tenant{ID: tenantID, Status: tenantmodel.StatusActive}, nil
 }

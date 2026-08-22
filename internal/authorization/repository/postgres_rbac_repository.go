@@ -11,9 +11,17 @@ import (
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
 )
 
-type PostgresRoleRepository struct{ db *sql.DB }
+// dbtx is satisfied by both *sql.DB and *sql.Tx, letting these repositories
+// run standalone or participate in a caller-owned transaction (Feature 2).
+type dbtx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
-func NewPostgresRoleRepository(db *sql.DB) *PostgresRoleRepository {
+type PostgresRoleRepository struct{ db dbtx }
+
+func NewPostgresRoleRepository(db dbtx) *PostgresRoleRepository {
 	return &PostgresRoleRepository{db: db}
 }
 func (r *PostgresRoleRepository) FindByID(ctx context.Context, id string) (*model.Role, error) {
@@ -106,9 +114,9 @@ func (r *PostgresPermissionRepository) FindByCode(ctx context.Context, code stri
 	return &permission, nil
 }
 
-type PostgresUserRoleRepository struct{ db *sql.DB }
+type PostgresUserRoleRepository struct{ db dbtx }
 
-func NewPostgresUserRoleRepository(db *sql.DB) *PostgresUserRoleRepository {
+func NewPostgresUserRoleRepository(db dbtx) *PostgresUserRoleRepository {
 	return &PostgresUserRoleRepository{db: db}
 }
 func (r *PostgresUserRoleRepository) Assign(ctx context.Context, assignment model.UserRole) (*model.UserRole, error) {

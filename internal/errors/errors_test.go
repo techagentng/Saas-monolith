@@ -114,6 +114,7 @@ func TestHTTPStatusMapping(t *testing.T) {
 		"resource not found":   {apperrors.CodeResourceNotFound, http.StatusNotFound},
 		"user not found":       {apperrors.CodeUserNotFound, http.StatusNotFound},
 		"tenant not found":     {apperrors.CodeTenantNotFound, http.StatusNotFound},
+		"tenant slug taken":    {apperrors.CodeTenantSlugTaken, http.StatusConflict},
 		"user already exists":  {apperrors.CodeUserAlreadyExists, http.StatusConflict},
 		"role already exists":  {apperrors.CodeRoleAlreadyExists, http.StatusConflict},
 		"rate limited":         {apperrors.CodeRateLimited, http.StatusTooManyRequests},

@@ -96,6 +96,10 @@ func (*matrixMemberships) Disable(context.Context, string, string, time.Time) er
 
 type matrixTenants struct{}
 
+func (*matrixTenants) Create(_ context.Context, tenant *tenantmodel.Tenant) (*tenantmodel.Tenant, error) {
+	return tenant, nil
+}
+
 func (*matrixTenants) FindByID(context.Context, string) (*tenantmodel.Tenant, error) {
 	return &tenantmodel.Tenant{Status: tenantmodel.StatusActive}, nil
 }
