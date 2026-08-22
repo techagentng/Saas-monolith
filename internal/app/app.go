@@ -9,6 +9,10 @@ import (
 	"time"
 
 	"github.com/techagentng/saas-monolith/internal/auth"
+	"github.com/techagentng/saas-monolith/internal/authorization"
+	authzhandler "github.com/techagentng/saas-monolith/internal/authorization/handler"
+	authzrepository "github.com/techagentng/saas-monolith/internal/authorization/repository"
+	authzservice "github.com/techagentng/saas-monolith/internal/authorization/service"
 	"github.com/techagentng/saas-monolith/internal/config"
 	"github.com/techagentng/saas-monolith/internal/database"
 	identityhandler "github.com/techagentng/saas-monolith/internal/identity/handler"
@@ -41,7 +45,16 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	userHandler := identityhandler.NewUserHandler(userService)
 	membershipService := tenantservice.NewMembershipService(users, tenants, memberships)
 	contextService := tenantservice.NewTenantContextService(tenants, memberships)
-	_ = tenanthandler.NewMembershipHandler(membershipService)
+	membershipHandler := tenanthandler.NewMembershipHandler(membershipService)
+
+	roles := authzrepository.NewPostgresRoleRepository(db)
+	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
+	userRoles := authzrepository.NewPostgresUserRoleRepository(db)
+	permissionResolution := authzservice.NewPermissionResolutionService(userRoles, rolePermissions, memberships, tenants)
+	authorizer := authzservice.NewAuthorizer(permissionResolution)
+	assignmentService := authzservice.NewAssignmentService(users, tenants, roles, userRoles, memberships)
+	roleAssignmentService := authzservice.NewTenantRoleAssignmentService(authorizer, roles, assignmentService)
+	roleAssignmentHandler := authzhandler.NewRoleAssignmentHandler(roleAssignmentService)
 
 	api := http.NewServeMux()
 	api.HandleFunc("GET /health", health)
@@ -52,8 +65,37 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		userHandler.GetByID(writer, request, request.PathValue("id"))
 	})
 	authMiddleware := auth.Middleware{Tokens: tokens, Sessions: sessions}
+	tenantMiddleware := tenant.Middleware{Resolver: contextService}
 	api.Handle("POST /api/v1/auth/logout", authMiddleware.Wrap(http.HandlerFunc(authenticationHandler.Logout)))
 	api.Handle("GET /api/v1/tenants/{tenantID}/context", authMiddleware.Wrap(tenantContextHandler(contextService)))
+
+	// Route authorization matrix (Feature 6):
+	//   POST   /api/v1/tenants/{tenantID}/members                 TENANT  user.create
+	//   DELETE /api/v1/tenants/{tenantID}/members/{userID}         TENANT  user.disable
+	//   POST   /api/v1/tenants/{tenantID}/role-assignments          TENANT  role.assign
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	api.Handle("POST /api/v1/tenants/{tenantID}/members", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "user.create"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				membershipHandler.Create(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+	api.Handle("DELETE /api/v1/tenants/{tenantID}/members/{userID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "user.disable"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				membershipHandler.Revoke(writer, request, request.PathValue("tenantID"), request.PathValue("userID"))
+			}),
+		),
+	)))
+	api.Handle("POST /api/v1/tenants/{tenantID}/role-assignments", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "role.assign"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				roleAssignmentHandler.Assign(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+
 	return &Application{db: db, Server: &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), Handler: api, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}}, nil
 }
 
