@@ -3,13 +3,24 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
+	"github.com/techagentng/saas-monolith/internal/tenant/model"
 	"github.com/techagentng/saas-monolith/internal/tenant/service"
 )
 
 type MembershipHandler struct{ service service.MembershipService }
+
+type PublicMembership struct {
+	ID        string                 `json:"id"`
+	TenantID  string                 `json:"tenant_id"`
+	UserID    string                 `json:"user_id"`
+	Status    model.MembershipStatus `json:"status"`
+	CreatedAt time.Time              `json:"created_at"`
+	UpdatedAt time.Time              `json:"updated_at"`
+}
 
 func NewMembershipHandler(membershipService service.MembershipService) *MembershipHandler {
 	return &MembershipHandler{service: membershipService}
@@ -30,7 +41,10 @@ func (h *MembershipHandler) Create(writer http.ResponseWriter, request *http.Req
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(writer).Encode(membership)
+	_ = json.NewEncoder(writer).Encode(PublicMembership{
+		ID: membership.ID, TenantID: membership.TenantID, UserID: membership.UserID,
+		Status: membership.Status, CreatedAt: membership.CreatedAt, UpdatedAt: membership.UpdatedAt,
+	})
 }
 
 func (h *MembershipHandler) Revoke(writer http.ResponseWriter, request *http.Request, tenantID, userID string) {

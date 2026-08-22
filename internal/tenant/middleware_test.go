@@ -38,6 +38,27 @@ func TestMiddlewareRejectsMissingPrincipal(t *testing.T) {
 	}
 }
 
+func TestRouteTenantIDUsesTheEstablishedTenantRoute(t *testing.T) {
+	if got := routeTenantID("/api/v1/tenants/550e8400-e29b-41d4-a716-446655440000/context"); got != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("routeTenantID() = %q", got)
+	}
+	if got := routeTenantID("/other/tenants/550e8400-e29b-41d4-a716-446655440000/context"); got != "" {
+		t.Fatalf("routeTenantID() accepted non-API tenant route: %q", got)
+	}
+}
+
+func TestMiddlewareRejectsNilResolvedContext(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/550e8400-e29b-41d4-a716-446655440000/context", nil)
+	request = request.WithContext(auth.WithPrincipal(request.Context(), auth.Principal{UserID: "550e8400-e29b-41d4-a716-446655440001"}))
+
+	Middleware{Resolver: &contextResolverFake{}}.Wrap(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("next handler called") })).ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+}
+
 type contextResolverFake struct {
 	context   *service.TenantContext
 	candidate string

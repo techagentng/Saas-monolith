@@ -24,17 +24,24 @@ func (m Middleware) Wrap(next http.Handler) http.Handler {
 			_ = apperrors.Map(err).WriteJSON(writer)
 			return
 		}
+		if trusted == nil {
+			_ = apperrors.Map(apperrors.New(apperrors.CodeInternalError, "tenant context unavailable", nil)).WriteJSON(writer)
+			return
+		}
 		ctx := WithContext(request.Context(), TenantContext{TenantID: trusted.TenantID})
 		next.ServeHTTP(writer, request.WithContext(ctx))
 	})
 }
 
 func routeTenantID(path string) string {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	for index := 0; index+1 < len(parts); index++ {
-		if parts[index] == "tenants" {
-			return parts[index+1]
-		}
+	const prefix = "/api/v1/tenants/"
+	if !strings.HasPrefix(path, prefix) {
+		return ""
 	}
-	return ""
+	remaining := strings.TrimPrefix(path, prefix)
+	parts := strings.Split(strings.Trim(remaining, "/"), "/")
+	if len(parts) < 2 || parts[0] == "" {
+		return ""
+	}
+	return parts[0]
 }

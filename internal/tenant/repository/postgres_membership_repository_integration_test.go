@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -30,9 +31,18 @@ func TestPostgresMembershipRepositoryPersistsUniqueAndDisabledMemberships(t *tes
 	if err := db.PingContext(ctx); err != nil {
 		t.Skipf("database is unavailable: %v", err)
 	}
-	for _, query := range []string{"DROP TABLE IF EXISTS tenant_memberships", "DROP TABLE IF EXISTS tenants", "DROP TABLE IF EXISTS users", `CREATE TABLE users (id UUID PRIMARY KEY, email TEXT NOT NULL, password_hash TEXT NOT NULL, status TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`, `CREATE TABLE tenants (id UUID PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'ACTIVE', created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`, `CREATE TABLE tenant_memberships (id UUID PRIMARY KEY, tenant_id UUID NOT NULL REFERENCES tenants(id), user_id UUID NOT NULL REFERENCES users(id), status TEXT NOT NULL DEFAULT 'ACTIVE', created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE (tenant_id, user_id))`, `CREATE INDEX tenant_memberships_user_id_idx ON tenant_memberships (user_id)`, `CREATE INDEX tenant_memberships_tenant_id_idx ON tenant_memberships (tenant_id)`} {
+	for _, query := range []string{"DROP TABLE IF EXISTS tenant_memberships", "DROP TABLE IF EXISTS tenants", "DROP TABLE IF EXISTS users"} {
 		if _, err := db.ExecContext(ctx, query); err != nil {
 			t.Fatalf("schema query failed: %v", err)
+		}
+	}
+	for _, migration := range []string{"000001_create_users.up.sql", "000003_create_tenants.up.sql", "000004_create_tenant_memberships.up.sql"} {
+		contents, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", migration))
+		if err != nil {
+			t.Fatalf("reading migration %s: %v", migration, err)
+		}
+		if _, err := db.ExecContext(ctx, string(contents)); err != nil {
+			t.Fatalf("applying migration %s: %v", migration, err)
 		}
 	}
 	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS tenant_memberships")
