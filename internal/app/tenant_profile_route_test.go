@@ -377,6 +377,13 @@ func (r *statefulProfileRepository) ListAccessibleByUserID(context.Context, stri
 	return []*tenantmodel.Tenant{r.tenant}, nil
 }
 
+func (r *statefulProfileRepository) FindBySlug(_ context.Context, slug string) (*tenantmodel.Tenant, error) {
+	if r.tenant == nil || r.tenant.Slug != slug {
+		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", nil)
+	}
+	return r.tenant, nil
+}
+
 func (r *statefulProfileRepository) UpdateProfile(_ context.Context, tenantID string, update tenantrepository.TenantProfileUpdate) (*tenantmodel.Tenant, error) {
 	r.updateCalls++
 	if r.tenant == nil || r.tenant.ID != tenantID {

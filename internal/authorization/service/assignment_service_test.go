@@ -90,6 +90,10 @@ func (*tenantRepoFake) UpdateProfile(context.Context, string, tenantrepository.T
 	return nil, nil
 }
 
+func (*tenantRepoFake) FindBySlug(context.Context, string) (*tenantmodel.Tenant, error) {
+	return nil, nil
+}
+
 type roleRepoFake struct {
 	role        *model.Role
 	permissions []string

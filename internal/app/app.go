@@ -49,6 +49,8 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	tenantCreationService := tenantservice.NewTenantService(db, users, tenants)
 	tenantRetrievalService := tenantservice.NewRetrievalService(tenants)
 	tenantHandler := tenanthandler.NewTenantHandler(tenantCreationService, tenantRetrievalService)
+	publicTenantService := tenantservice.NewPublicTenantService(tenants)
+	publicTenantHandler := tenanthandler.NewPublicTenantHandler(publicTenantService)
 
 	roles := authzrepository.NewPostgresRoleRepository(db)
 	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
@@ -67,6 +69,17 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	api.HandleFunc("GET /api/v1/users/{id}", func(writer http.ResponseWriter, request *http.Request) {
 		userHandler.GetByID(writer, request, request.PathValue("id"))
 	})
+	// Public tenant identity (Feature 5): resolve a tenant by its public slug.
+	// This route is intentionally anonymous — no authentication, no tenant
+	// context, and no permission middleware — because the slug IS the public
+	// identity. It is registered before the auth middleware is even built so
+	// it cannot be wrapped into a private chain by accident. The service hides
+	// non-ACTIVE tenants and reserved slugs behind TENANT_NOT_FOUND, and the
+	// response DTO carries no internal identifiers or private contact data.
+	api.HandleFunc("GET /api/v1/public/tenants/{slug}", func(writer http.ResponseWriter, request *http.Request) {
+		publicTenantHandler.GetBySlug(writer, request, request.PathValue("slug"))
+	})
+
 	authMiddleware := auth.Middleware{Tokens: tokens, Sessions: sessions}
 	tenantMiddleware := tenant.Middleware{Resolver: contextService}
 	api.Handle("POST /api/v1/auth/logout", authMiddleware.Wrap(http.HandlerFunc(authenticationHandler.Logout)))

@@ -276,6 +276,10 @@ func (f *fakeGetTenantRepository) UpdateProfile(context.Context, string, tenantr
 	return nil, apperrors.New(apperrors.CodeInternalError, "not implemented in fake", nil)
 }
 
+func (f *fakeGetTenantRepository) FindBySlug(context.Context, string) (*tenantmodel.Tenant, error) {
+	return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", nil)
+}
+
 type fakeGetTenantMembershipRepository struct{ scenario *getTenantScenario }
 
 func (f *fakeGetTenantMembershipRepository) Create(context.Context, tenantmodel.TenantMembership) (*tenantmodel.TenantMembership, error) {

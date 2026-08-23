@@ -66,9 +66,14 @@ func (s *tenantService) Create(ctx context.Context, input CreateTenantInput) (*m
 	if name == "" {
 		return nil, apperrors.New(apperrors.CodeValidationFailed, "tenant name is required", nil)
 	}
-	slug := strings.TrimSpace(input.Slug)
-	if slug == "" {
-		return nil, apperrors.New(apperrors.CodeValidationFailed, "tenant slug is required", nil)
+	// Feature 5: the slug is the tenant's public identity, so it must already
+	// be canonical. It is validated here — before BeginTx — so a malformed or
+	// reserved slug never opens a transaction, and never creates a tenant,
+	// membership, or role assignment. The value is passed through untouched;
+	// validation deliberately does not normalize.
+	slug := input.Slug
+	if err := model.ValidateSlug(slug); err != nil {
+		return nil, err
 	}
 	if _, err := uuid.Parse(input.CreatorUserID); err != nil {
 		return nil, apperrors.New(apperrors.CodeInvalidRequest, "invalid request", err)

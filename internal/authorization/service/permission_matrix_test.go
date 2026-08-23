@@ -112,3 +112,7 @@ func (*matrixTenants) ListAccessibleByUserID(context.Context, string) ([]*tenant
 func (*matrixTenants) UpdateProfile(context.Context, string, tenantrepository.TenantProfileUpdate) (*tenantmodel.Tenant, error) {
 	return nil, nil
 }
+
+func (*matrixTenants) FindBySlug(context.Context, string) (*tenantmodel.Tenant, error) {
+	return nil, nil
+}

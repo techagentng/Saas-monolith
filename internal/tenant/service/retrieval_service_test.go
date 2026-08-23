@@ -172,3 +172,7 @@ func (f *fakeTenantRepository) ListAccessibleByUserID(ctx context.Context, userI
 func (f *fakeTenantRepository) UpdateProfile(context.Context, string, repository.TenantProfileUpdate) (*model.Tenant, error) {
 	return nil, errors.New("not implemented in fake")
 }
+
+func (f *fakeTenantRepository) FindBySlug(context.Context, string) (*model.Tenant, error) {
+	return nil, errors.New("not implemented in fake")
+}

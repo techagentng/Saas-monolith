@@ -96,6 +96,10 @@ func (r *tenantRepositoryFake) UpdateProfile(context.Context, string, repository
 	return nil, nil
 }
 
+func (r *tenantRepositoryFake) FindBySlug(context.Context, string) (*model.Tenant, error) {
+	return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", nil)
+}
+
 type membershipRepositoryFake struct {
 	created      *model.TenantMembership
 	createErr    error
