@@ -348,6 +348,10 @@ func (*fakeAuthzTenantRepository) UpdateProfile(context.Context, string, tenantr
 	return nil, nil
 }
 
+func (*fakeAuthzTenantRepository) FindBySlug(context.Context, string) (*tenantmodel.Tenant, error) {
+	return nil, nil
+}
+
 type fakeAuthzMembershipRepository struct{}
 
 func (*fakeAuthzMembershipRepository) Create(context.Context, tenantmodel.TenantMembership) (*tenantmodel.TenantMembership, error) {

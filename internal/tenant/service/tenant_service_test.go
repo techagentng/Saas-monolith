@@ -15,10 +15,34 @@ func TestCreateTenantRejectsEmptyName(t *testing.T) {
 	assertCreateTenantCode(t, err, apperrors.CodeValidationFailed)
 }
 
+// Feature 5 gave slug syntax its own error code; an empty or whitespace slug
+// is now a TENANT_SLUG_INVALID rather than a generic validation failure.
 func TestCreateTenantRejectsEmptySlug(t *testing.T) {
 	service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{}, &tenantRepositoryFake{})
 	_, err := service.Create(context.Background(), CreateTenantInput{Name: "Salon", Slug: "   ", CreatorUserID: testUserID})
-	assertCreateTenantCode(t, err, apperrors.CodeValidationFailed)
+	assertCreateTenantCode(t, err, apperrors.CodeTenantSlugInvalid)
+}
+
+// panicOnBeginTx fails the test if a transaction is ever opened, so these
+// cases also prove no tenant, membership, or role assignment can be created.
+func TestCreateTenantRejectsNonCanonicalSlugBeforeTransaction(t *testing.T) {
+	for _, slug := range []string{"Acme", "acme salon", "acme_salon", "-acme", "acme-", "ac", "acmé"} {
+		t.Run(slug, func(t *testing.T) {
+			service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{}, &tenantRepositoryFake{})
+			_, err := service.Create(context.Background(), CreateTenantInput{Name: "Salon", Slug: slug, CreatorUserID: testUserID})
+			assertCreateTenantCode(t, err, apperrors.CodeTenantSlugInvalid)
+		})
+	}
+}
+
+func TestCreateTenantRejectsReservedSlugBeforeTransaction(t *testing.T) {
+	for _, slug := range []string{"admin", "api", "login", "dashboard", "auth", "book", "settings"} {
+		t.Run(slug, func(t *testing.T) {
+			service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{}, &tenantRepositoryFake{})
+			_, err := service.Create(context.Background(), CreateTenantInput{Name: "Salon", Slug: slug, CreatorUserID: testUserID})
+			assertCreateTenantCode(t, err, apperrors.CodeTenantSlugInvalid)
+		})
+	}
 }
 
 func TestCreateTenantRejectsInvalidCreatorID(t *testing.T) {

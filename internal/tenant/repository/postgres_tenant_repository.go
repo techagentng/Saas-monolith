@@ -68,6 +68,26 @@ func (r *PostgresTenantRepository) FindByID(ctx context.Context, id string) (*mo
 	return &tenant, nil
 }
 
+// FindBySlug resolves a tenant by its exact canonical slug, relying on the
+// unique index created with the slug column. The comparison is exact: no
+// lowering, trimming, or pattern matching happens here, so lookup agrees
+// byte-for-byte with what creation validated and stored.
+//
+// Visibility rules (for example hiding DISABLED tenants from public callers)
+// belong to the service layer, not here.
+func (r *PostgresTenantRepository) FindBySlug(ctx context.Context, slug string) (*model.Tenant, error) {
+	var tenant model.Tenant
+	err := r.db.QueryRowContext(ctx, `SELECT id, name, slug, status, description, contact_email, contact_phone, timezone, created_at, updated_at FROM tenants WHERE slug = $1`, slug).
+		Scan(&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status, &tenant.Description, &tenant.ContactEmail, &tenant.ContactPhone, &tenant.Timezone, &tenant.CreatedAt, &tenant.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("finding tenant by slug: %w", err)
+	}
+	return &tenant, nil
+}
+
 // ListAccessibleByUserID returns all ACTIVE tenants where the user has an ACTIVE membership.
 // Results are ordered by created_at ASC, then id ASC for deterministic results.
 // Uses a single JOIN query to avoid N+1 lookups.
