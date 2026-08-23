@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -25,8 +26,19 @@ type CreateTenantInput struct {
 	CreatorUserID string
 }
 
+// UpdateTenantProfileRequest carries profile update fields from the transport layer.
+// Only non-nil fields will be updated; omitted fields remain unchanged.
+type UpdateTenantProfileRequest struct {
+	Name         *string
+	Description  *string
+	ContactEmail *string
+	ContactPhone *string
+	Timezone     *string
+}
+
 type TenantService interface {
 	Create(ctx context.Context, input CreateTenantInput) (*model.Tenant, error)
+	UpdateProfile(ctx context.Context, tenantID string, req UpdateTenantProfileRequest) (*model.Tenant, error)
 }
 
 // txBeginner is satisfied by *sql.DB. It is the only capability TenantService
@@ -36,12 +48,13 @@ type txBeginner interface {
 }
 
 type tenantService struct {
-	db    txBeginner
-	users identityrepository.UserRepository
+	db      txBeginner
+	users   identityrepository.UserRepository
+	tenants repository.TenantRepository
 }
 
-func NewTenantService(db txBeginner, users identityrepository.UserRepository) TenantService {
-	return &tenantService{db: db, users: users}
+func NewTenantService(db txBeginner, users identityrepository.UserRepository, tenants repository.TenantRepository) TenantService {
+	return &tenantService{db: db, users: users, tenants: tenants}
 }
 
 // Create persists a tenant, an ACTIVE membership for the creator, and a
@@ -118,4 +131,87 @@ func (s *tenantService) Create(ctx context.Context, input CreateTenantInput) (*m
 	}
 	committed = true
 	return tenant, nil
+}
+
+// UpdateProfile updates the profile fields of a tenant.
+// Validates all input fields and calls the repository to persist changes.
+func (s *tenantService) UpdateProfile(ctx context.Context, tenantID string, req UpdateTenantProfileRequest) (*model.Tenant, error) {
+	if _, err := uuid.Parse(tenantID); err != nil {
+		return nil, apperrors.New(apperrors.CodeInvalidRequest, "invalid tenant id", err)
+	}
+
+	update := &repository.TenantProfileUpdate{}
+
+	// Validate and prepare name field if provided
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "name cannot be empty", nil)
+		}
+		if len(name) > 255 {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "name exceeds maximum length", nil)
+		}
+		update.Name = &name
+	}
+
+	// Validate and prepare description field if provided
+	if req.Description != nil {
+		desc := strings.TrimSpace(*req.Description)
+		if desc == "" {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "description cannot be empty if provided", nil)
+		}
+		if len(desc) > 1000 {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "description exceeds maximum length", nil)
+		}
+		update.Description = &desc
+	}
+
+	// Validate and prepare contact email field if provided
+	if req.ContactEmail != nil {
+		email := strings.TrimSpace(*req.ContactEmail)
+		if email == "" {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "contact email cannot be empty if provided", nil)
+		}
+		if _, err := mail.ParseAddress(email); err != nil {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "invalid email format", nil)
+		}
+		update.ContactEmail = &email
+	}
+
+	// Validate and prepare contact phone field if provided
+	if req.ContactPhone != nil {
+		phone := strings.TrimSpace(*req.ContactPhone)
+		if phone == "" {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "contact phone cannot be empty if provided", nil)
+		}
+		if len(phone) > 20 {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "phone number exceeds maximum length", nil)
+		}
+		update.ContactPhone = &phone
+	}
+
+	// Validate and prepare timezone field if provided
+	if req.Timezone != nil {
+		tz := strings.TrimSpace(*req.Timezone)
+		if tz == "" {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "timezone cannot be empty if provided", nil)
+		}
+		if _, err := time.LoadLocation(tz); err != nil {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "invalid timezone identifier", nil)
+		}
+		update.Timezone = &tz
+	}
+
+	// Verify at least one field is being updated
+	if update.IsEmpty() {
+		return nil, apperrors.New(apperrors.CodeValidationFailed, "no fields to update", nil)
+	}
+
+	// Call repository to persist the update
+	updated, err := s.tenants.UpdateProfile(ctx, tenantID, *update)
+	if err != nil {
+		return nil, err
+	}
+
+	return updated, nil
 }

@@ -3,7 +3,10 @@
     "allow": [
       "Bash(env -u POSTGRES_HOST -u POSTGRES_PORT -u POSTGRES_USER -u POSTGRES_PASSWORD -u POSTGRES_DB go run .)",
       "Bash(go test *)",
-      "Bash(go build *)"
+      "Bash(go build *)",
+      "Artifact",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }

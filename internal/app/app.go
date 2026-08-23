@@ -46,7 +46,7 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	membershipService := tenantservice.NewMembershipService(users, tenants, memberships)
 	contextService := tenantservice.NewTenantContextService(tenants, memberships)
 	membershipHandler := tenanthandler.NewMembershipHandler(membershipService)
-	tenantCreationService := tenantservice.NewTenantService(db, users)
+	tenantCreationService := tenantservice.NewTenantService(db, users, tenants)
 	tenantRetrievalService := tenantservice.NewRetrievalService(tenants)
 	tenantHandler := tenanthandler.NewTenantHandler(tenantCreationService, tenantRetrievalService)
 
@@ -88,6 +88,16 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "tenant.read"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				tenantHandler.GetByID(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+
+	// Tenant profile update (Feature 4): Update tenant profile fields
+	// Ordering: Authentication -> Tenant Context -> Authorization (tenant.update) -> Handler
+	api.Handle("PATCH /api/v1/tenants/{tenantID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "tenant.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				tenantHandler.UpdateProfile(writer, request, request.PathValue("tenantID"))
 			}),
 		),
 	)))

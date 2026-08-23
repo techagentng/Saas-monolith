@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
@@ -56,8 +58,8 @@ func isSlugUniqueViolation(err error) bool {
 
 func (r *PostgresTenantRepository) FindByID(ctx context.Context, id string) (*model.Tenant, error) {
 	var tenant model.Tenant
-	err := r.db.QueryRowContext(ctx, `SELECT id, name, slug, status, created_at, updated_at FROM tenants WHERE id = $1`, id).
-		Scan(&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status, &tenant.CreatedAt, &tenant.UpdatedAt)
+	err := r.db.QueryRowContext(ctx, `SELECT id, name, slug, status, description, contact_email, contact_phone, timezone, created_at, updated_at FROM tenants WHERE id = $1`, id).
+		Scan(&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status, &tenant.Description, &tenant.ContactEmail, &tenant.ContactPhone, &tenant.Timezone, &tenant.CreatedAt, &tenant.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", err)
 	}
@@ -72,7 +74,7 @@ func (r *PostgresTenantRepository) FindByID(ctx context.Context, id string) (*mo
 // Uses a single JOIN query to avoid N+1 lookups.
 func (r *PostgresTenantRepository) ListAccessibleByUserID(ctx context.Context, userID string) ([]*model.Tenant, error) {
 	rows, err := r.db.QueryContext(ctx, `
-SELECT DISTINCT t.id, t.name, t.slug, t.status, t.created_at, t.updated_at
+SELECT DISTINCT t.id, t.name, t.slug, t.status, t.description, t.contact_email, t.contact_phone, t.timezone, t.created_at, t.updated_at
 FROM tenants t
 INNER JOIN tenant_memberships tm ON t.id = tm.tenant_id
 WHERE tm.user_id = $1
@@ -87,7 +89,7 @@ ORDER BY t.created_at ASC, t.id ASC
 	var tenants []*model.Tenant
 	for rows.Next() {
 		var tenant model.Tenant
-		if err := rows.Scan(&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status, &tenant.CreatedAt, &tenant.UpdatedAt); err != nil {
+		if err := rows.Scan(&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status, &tenant.Description, &tenant.ContactEmail, &tenant.ContactPhone, &tenant.Timezone, &tenant.CreatedAt, &tenant.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scanning tenant: %w", err)
 		}
 		tenants = append(tenants, &tenant)
@@ -96,4 +98,67 @@ ORDER BY t.created_at ASC, t.id ASC
 		return nil, fmt.Errorf("iterating tenants: %w", err)
 	}
 	return tenants, nil
+}
+
+// UpdateProfile updates tenant profile fields: name, description, contact_email, contact_phone, timezone.
+// Only non-nil fields in the update are modified. Omitted fields remain unchanged.
+// Returns the full updated tenant or an error.
+func (r *PostgresTenantRepository) UpdateProfile(ctx context.Context, tenantID string, update TenantProfileUpdate) (*model.Tenant, error) {
+	// Build dynamic SET clause from non-nil fields
+	sets := []string{}
+	args := []interface{}{}
+	argIndex := 1
+
+	if update.Name != nil {
+		sets = append(sets, fmt.Sprintf("name = $%d", argIndex))
+		args = append(args, *update.Name)
+		argIndex++
+	}
+	if update.Description != nil {
+		sets = append(sets, fmt.Sprintf("description = $%d", argIndex))
+		args = append(args, *update.Description)
+		argIndex++
+	}
+	if update.ContactEmail != nil {
+		sets = append(sets, fmt.Sprintf("contact_email = $%d", argIndex))
+		args = append(args, *update.ContactEmail)
+		argIndex++
+	}
+	if update.ContactPhone != nil {
+		sets = append(sets, fmt.Sprintf("contact_phone = $%d", argIndex))
+		args = append(args, *update.ContactPhone)
+		argIndex++
+	}
+	if update.Timezone != nil {
+		sets = append(sets, fmt.Sprintf("timezone = $%d", argIndex))
+		args = append(args, *update.Timezone)
+		argIndex++
+	}
+
+	// Add WHERE clause
+	sets = append(sets, fmt.Sprintf("updated_at = CURRENT_TIMESTAMP"))
+	args = append(args, tenantID)
+	whereIndex := argIndex
+
+	query := fmt.Sprintf(
+		"UPDATE tenants SET %s WHERE id = $%d RETURNING id, name, slug, status, description, contact_email, contact_phone, timezone, created_at, updated_at",
+		strings.Join(sets, ", "),
+		whereIndex,
+	)
+
+	var tenant model.Tenant
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(
+		&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status,
+		&tenant.Description, &tenant.ContactEmail, &tenant.ContactPhone, &tenant.Timezone,
+		&tenant.CreatedAt, &tenant.UpdatedAt,
+	)
+
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("updating tenant: %w", err)
+	}
+
+	return &tenant, nil
 }

@@ -21,12 +21,16 @@ func NewTenantHandler(creationService service.TenantService, retrievalService se
 }
 
 type PublicTenant struct {
-	ID        string       `json:"id"`
-	Name      string       `json:"name"`
-	Slug      string       `json:"slug"`
-	Status    model.Status `json:"status"`
-	CreatedAt time.Time    `json:"created_at"`
-	UpdatedAt time.Time    `json:"updated_at"`
+	ID           string       `json:"id"`
+	Name         string       `json:"name"`
+	Slug         string       `json:"slug"`
+	Status       model.Status `json:"status"`
+	Description  *string      `json:"description,omitempty"`
+	ContactEmail *string      `json:"contact_email,omitempty"`
+	ContactPhone *string      `json:"contact_phone,omitempty"`
+	Timezone     *string      `json:"timezone,omitempty"`
+	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
 }
 
 // Create provisions a tenant and its initial BUSINESS_OWNER for the
@@ -55,7 +59,9 @@ func (h *TenantHandler) Create(writer http.ResponseWriter, request *http.Request
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(writer).Encode(PublicTenant{
-		ID: tenant.ID, Name: tenant.Name, Slug: tenant.Slug, Status: tenant.Status, CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
+		ID: tenant.ID, Name: tenant.Name, Slug: tenant.Slug, Status: tenant.Status,
+		Description: tenant.Description, ContactEmail: tenant.ContactEmail, ContactPhone: tenant.ContactPhone, Timezone: tenant.Timezone,
+		CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
 	})
 }
 
@@ -77,7 +83,9 @@ func (h *TenantHandler) List(writer http.ResponseWriter, request *http.Request) 
 	result := make([]PublicTenant, len(tenants))
 	for i, t := range tenants {
 		result[i] = PublicTenant{
-			ID: t.ID, Name: t.Name, Slug: t.Slug, Status: t.Status, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+			ID: t.ID, Name: t.Name, Slug: t.Slug, Status: t.Status,
+			Description: t.Description, ContactEmail: t.ContactEmail, ContactPhone: t.ContactPhone, Timezone: t.Timezone,
+			CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
 		}
 	}
 	_ = json.NewEncoder(writer).Encode(result)
@@ -98,7 +106,33 @@ func (h *TenantHandler) GetByID(writer http.ResponseWriter, request *http.Reques
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(writer).Encode(PublicTenant{
-		ID: tenant.ID, Name: tenant.Name, Slug: tenant.Slug, Status: tenant.Status, CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
+		ID: tenant.ID, Name: tenant.Name, Slug: tenant.Slug, Status: tenant.Status,
+		Description: tenant.Description, ContactEmail: tenant.ContactEmail, ContactPhone: tenant.ContactPhone, Timezone: tenant.Timezone,
+		CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
+	})
+}
+
+// UpdateProfile updates the profile fields of an accessible tenant.
+// The authenticated user must have tenant.update permission.
+func (h *TenantHandler) UpdateProfile(writer http.ResponseWriter, request *http.Request, tenantID string) {
+	var input service.UpdateTenantProfileRequest
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+		writeTenantError(writer, apperrors.New(apperrors.CodeInvalidRequest, "invalid request", err))
+		return
+	}
+
+	tenant, err := h.creationService.UpdateProfile(request.Context(), tenantID, input)
+	if err != nil {
+		writeTenantError(writer, err)
+		return
+	}
+
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(writer).Encode(PublicTenant{
+		ID: tenant.ID, Name: tenant.Name, Slug: tenant.Slug, Status: tenant.Status,
+		Description: tenant.Description, ContactEmail: tenant.ContactEmail, ContactPhone: tenant.ContactPhone, Timezone: tenant.Timezone,
+		CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
 	})
 }
 
