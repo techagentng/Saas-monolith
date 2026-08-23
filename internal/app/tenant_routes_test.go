@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,52 @@ import (
 	tenantmodel "github.com/techagentng/saas-monolith/internal/tenant/model"
 	tenantservice "github.com/techagentng/saas-monolith/internal/tenant/service"
 )
+
+func TestListTenantsRouteRequiresAuthentication(t *testing.T) {
+	handler, _ := buildListTenantsRoute(t, []*tenantmodel.Tenant{})
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil))
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for unauthenticated request", recorder.Code)
+	}
+}
+
+func TestListTenantsRouteReturnsEmptyList(t *testing.T) {
+	handler, tokens := buildListTenantsRoute(t, []*tenantmodel.Tenant{})
+	token, err := tokens.Issue(routeUserID, routeSessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/tenants", nil)
+	request.Header.Set("Authorization", "Bearer "+token)
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if !strings.Contains(recorder.Body.String(), "[]") {
+		t.Fatalf("body should contain empty array, got: %s", recorder.Body.String())
+	}
+}
+
+func buildListTenantsRoute(t *testing.T, tenants []*tenantmodel.Tenant) (http.Handler, *identityservice.TokenManager) {
+	t.Helper()
+	publicKey, privateKey, genErr := ed25519.GenerateKey(nil)
+	if genErr != nil {
+		t.Fatal(genErr)
+	}
+	tokens := identityservice.NewTokenManager(identityservice.TokenConfig{PrivateKey: privateKey, PublicKey: publicKey, AccessLifetime: time.Minute})
+	authMiddleware := auth.Middleware{Tokens: tokens, Sessions: fakeSessionRepository{}}
+	tenantHandler := tenanthandler.NewTenantHandler(&fakeTenantService{}, &fakeRetrievalService{tenants: tenants})
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/tenants", authMiddleware.Wrap(http.HandlerFunc(tenantHandler.List)))
+	return mux, tokens
+}
 
 // These tests exercise the exact production middleware chain app.New wires
 // for Feature 2 tenant creation:
@@ -70,7 +117,7 @@ func buildTenantCreateRoute(t *testing.T, result *tenantmodel.Tenant, err error)
 	}
 	tokens := identityservice.NewTokenManager(identityservice.TokenConfig{PrivateKey: privateKey, PublicKey: publicKey, AccessLifetime: time.Minute})
 	authMiddleware := auth.Middleware{Tokens: tokens, Sessions: fakeSessionRepository{}}
-	tenantHandler := tenanthandler.NewTenantHandler(&fakeTenantService{tenant: result, err: err})
+	tenantHandler := tenanthandler.NewTenantHandler(&fakeTenantService{tenant: result, err: err}, &fakeRetrievalService{})
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/v1/tenants", authMiddleware.Wrap(http.HandlerFunc(tenantHandler.Create)))
@@ -98,4 +145,29 @@ func (f *fakeTenantService) Create(context.Context, tenantservice.CreateTenantIn
 		return nil, f.err
 	}
 	return f.tenant, nil
+}
+
+type fakeRetrievalService struct {
+	tenants []*tenantmodel.Tenant
+	err     error
+}
+
+func (f *fakeRetrievalService) ListAccessible(context.Context, string) ([]*tenantmodel.Tenant, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.tenants == nil {
+		return []*tenantmodel.Tenant{}, nil
+	}
+	return f.tenants, nil
+}
+
+func (f *fakeRetrievalService) GetAccessible(context.Context, string, string) (*tenantmodel.Tenant, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.tenants != nil && len(f.tenants) > 0 {
+		return f.tenants[0], nil
+	}
+	return nil, apperrors.New(apperrors.CodeTenantAccessDenied, "access denied", nil)
 }

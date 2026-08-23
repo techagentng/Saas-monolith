@@ -87,6 +87,10 @@ func (r *tenantRepositoryFake) FindByID(context.Context, string) (*model.Tenant,
 	return &model.Tenant{ID: testTenantID, Status: model.StatusActive}, nil
 }
 
+func (r *tenantRepositoryFake) ListAccessibleByUserID(context.Context, string) ([]*model.Tenant, error) {
+	return []*model.Tenant{}, nil
+}
+
 type membershipRepositoryFake struct {
 	created      *model.TenantMembership
 	createErr    error

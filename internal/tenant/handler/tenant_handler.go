@@ -11,10 +11,13 @@ import (
 	"github.com/techagentng/saas-monolith/internal/tenant/service"
 )
 
-type TenantHandler struct{ service service.TenantService }
+type TenantHandler struct {
+	creationService  service.TenantService
+	retrievalService service.RetrievalService
+}
 
-func NewTenantHandler(tenantService service.TenantService) *TenantHandler {
-	return &TenantHandler{service: tenantService}
+func NewTenantHandler(creationService service.TenantService, retrievalService service.RetrievalService) *TenantHandler {
+	return &TenantHandler{creationService: creationService, retrievalService: retrievalService}
 }
 
 type PublicTenant struct {
@@ -44,13 +47,56 @@ func (h *TenantHandler) Create(writer http.ResponseWriter, request *http.Request
 		writeTenantError(writer, apperrors.New(apperrors.CodeInvalidRequest, "invalid request", err))
 		return
 	}
-	tenant, err := h.service.Create(request.Context(), service.CreateTenantInput{Name: input.Name, Slug: input.Slug, CreatorUserID: principal.UserID})
+	tenant, err := h.creationService.Create(request.Context(), service.CreateTenantInput{Name: input.Name, Slug: input.Slug, CreatorUserID: principal.UserID})
 	if err != nil {
 		writeTenantError(writer, err)
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(writer).Encode(PublicTenant{
+		ID: tenant.ID, Name: tenant.Name, Slug: tenant.Slug, Status: tenant.Status, CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
+	})
+}
+
+// List returns all accessible tenants for the authenticated user,
+// ordered by created_at, id.
+func (h *TenantHandler) List(writer http.ResponseWriter, request *http.Request) {
+	principal, ok := auth.FromContext(request.Context())
+	if !ok {
+		writeTenantError(writer, apperrors.New(apperrors.CodeInvalidCredentials, "invalid credentials", nil))
+		return
+	}
+	tenants, err := h.retrievalService.ListAccessible(request.Context(), principal.UserID)
+	if err != nil {
+		writeTenantError(writer, err)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	result := make([]PublicTenant, len(tenants))
+	for i, t := range tenants {
+		result[i] = PublicTenant{
+			ID: t.ID, Name: t.Name, Slug: t.Slug, Status: t.Status, CreatedAt: t.CreatedAt, UpdatedAt: t.UpdatedAt,
+		}
+	}
+	_ = json.NewEncoder(writer).Encode(result)
+}
+
+// GetByID returns a single accessible tenant, or 403 if the user lacks access.
+func (h *TenantHandler) GetByID(writer http.ResponseWriter, request *http.Request, tenantID string) {
+	principal, ok := auth.FromContext(request.Context())
+	if !ok {
+		writeTenantError(writer, apperrors.New(apperrors.CodeInvalidCredentials, "invalid credentials", nil))
+		return
+	}
+	tenant, err := h.retrievalService.GetAccessible(request.Context(), principal.UserID, tenantID)
+	if err != nil {
+		writeTenantError(writer, err)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(writer).Encode(PublicTenant{
 		ID: tenant.ID, Name: tenant.Name, Slug: tenant.Slug, Status: tenant.Status, CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
 	})

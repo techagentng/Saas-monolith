@@ -339,6 +339,10 @@ func (*fakeAuthzTenantRepository) FindByID(_ context.Context, id string) (*tenan
 	return &tenantmodel.Tenant{ID: id, Status: tenantmodel.StatusActive}, nil
 }
 
+func (*fakeAuthzTenantRepository) ListAccessibleByUserID(_ context.Context, userID string) ([]*tenantmodel.Tenant, error) {
+	return []*tenantmodel.Tenant{}, nil
+}
+
 type fakeAuthzMembershipRepository struct{}
 
 func (*fakeAuthzMembershipRepository) Create(context.Context, tenantmodel.TenantMembership) (*tenantmodel.TenantMembership, error) {

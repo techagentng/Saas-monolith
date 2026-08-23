@@ -66,3 +66,34 @@ func (r *PostgresTenantRepository) FindByID(ctx context.Context, id string) (*mo
 	}
 	return &tenant, nil
 }
+
+// ListAccessibleByUserID returns all ACTIVE tenants where the user has an ACTIVE membership.
+// Results are ordered by created_at ASC, then id ASC for deterministic results.
+// Uses a single JOIN query to avoid N+1 lookups.
+func (r *PostgresTenantRepository) ListAccessibleByUserID(ctx context.Context, userID string) ([]*model.Tenant, error) {
+	rows, err := r.db.QueryContext(ctx, `
+SELECT DISTINCT t.id, t.name, t.slug, t.status, t.created_at, t.updated_at
+FROM tenants t
+INNER JOIN tenant_memberships tm ON t.id = tm.tenant_id
+WHERE tm.user_id = $1
+  AND tm.status = 'ACTIVE'
+  AND t.status = 'ACTIVE'
+ORDER BY t.created_at ASC, t.id ASC
+`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("listing accessible tenants: %w", err)
+	}
+	defer rows.Close()
+	var tenants []*model.Tenant
+	for rows.Next() {
+		var tenant model.Tenant
+		if err := rows.Scan(&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status, &tenant.CreatedAt, &tenant.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scanning tenant: %w", err)
+		}
+		tenants = append(tenants, &tenant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating tenants: %w", err)
+	}
+	return tenants, nil
+}

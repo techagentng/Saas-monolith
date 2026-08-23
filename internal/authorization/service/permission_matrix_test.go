@@ -103,3 +103,7 @@ func (*matrixTenants) Create(_ context.Context, tenant *tenantmodel.Tenant) (*te
 func (*matrixTenants) FindByID(context.Context, string) (*tenantmodel.Tenant, error) {
 	return &tenantmodel.Tenant{Status: tenantmodel.StatusActive}, nil
 }
+
+func (*matrixTenants) ListAccessibleByUserID(context.Context, string) ([]*tenantmodel.Tenant, error) {
+	return []*tenantmodel.Tenant{}, nil
+}

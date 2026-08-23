@@ -47,7 +47,8 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	contextService := tenantservice.NewTenantContextService(tenants, memberships)
 	membershipHandler := tenanthandler.NewMembershipHandler(membershipService)
 	tenantCreationService := tenantservice.NewTenantService(db, users)
-	tenantHandler := tenanthandler.NewTenantHandler(tenantCreationService)
+	tenantRetrievalService := tenantservice.NewRetrievalService(tenants)
+	tenantHandler := tenanthandler.NewTenantHandler(tenantCreationService, tenantRetrievalService)
 
 	roles := authzrepository.NewPostgresRoleRepository(db)
 	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
@@ -76,6 +77,20 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// permission middleware applies here — there is no tenant yet against
 	// which either could be evaluated.
 	api.Handle("POST /api/v1/tenants", authMiddleware.Wrap(http.HandlerFunc(tenantHandler.Create)))
+
+	// Tenant retrieval (Feature 3): List accessible tenants
+	// Ordering: Authentication -> Handler (membership-based access control in service)
+	api.Handle("GET /api/v1/tenants", authMiddleware.Wrap(http.HandlerFunc(tenantHandler.List)))
+
+	// Tenant retrieval (Feature 3): Get accessible tenant by ID
+	// Ordering: Authentication -> Tenant Context -> Authorization (tenant.read) -> Handler
+	api.Handle("GET /api/v1/tenants/{tenantID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "tenant.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				tenantHandler.GetByID(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
 
 	// Route authorization matrix (Feature 6):
 	//   POST   /api/v1/tenants/{tenantID}/members                 TENANT  user.create

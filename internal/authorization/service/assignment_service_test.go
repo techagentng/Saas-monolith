@@ -81,6 +81,10 @@ func (*tenantRepoFake) FindByID(context.Context, string) (*tenantmodel.Tenant, e
 	return &tenantmodel.Tenant{ID: tenantID, Status: tenantmodel.StatusActive}, nil
 }
 
+func (*tenantRepoFake) ListAccessibleByUserID(context.Context, string) ([]*tenantmodel.Tenant, error) {
+	return []*tenantmodel.Tenant{}, nil
+}
+
 type roleRepoFake struct {
 	role        *model.Role
 	permissions []string
