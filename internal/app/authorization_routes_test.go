@@ -21,6 +21,7 @@ import (
 	"github.com/techagentng/saas-monolith/internal/tenant"
 	tenanthandler "github.com/techagentng/saas-monolith/internal/tenant/handler"
 	tenantmodel "github.com/techagentng/saas-monolith/internal/tenant/model"
+	tenantrepository "github.com/techagentng/saas-monolith/internal/tenant/repository"
 	tenantservice "github.com/techagentng/saas-monolith/internal/tenant/service"
 )
 
@@ -341,6 +342,10 @@ func (*fakeAuthzTenantRepository) FindByID(_ context.Context, id string) (*tenan
 
 func (*fakeAuthzTenantRepository) ListAccessibleByUserID(_ context.Context, userID string) ([]*tenantmodel.Tenant, error) {
 	return []*tenantmodel.Tenant{}, nil
+}
+
+func (*fakeAuthzTenantRepository) UpdateProfile(context.Context, string, tenantrepository.TenantProfileUpdate) (*tenantmodel.Tenant, error) {
+	return nil, nil
 }
 
 type fakeAuthzMembershipRepository struct{}

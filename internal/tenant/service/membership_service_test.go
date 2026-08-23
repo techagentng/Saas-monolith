@@ -10,6 +10,7 @@ import (
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
 	identitymodel "github.com/techagentng/saas-monolith/internal/identity/model"
 	"github.com/techagentng/saas-monolith/internal/tenant/model"
+	"github.com/techagentng/saas-monolith/internal/tenant/repository"
 )
 
 const (
@@ -89,6 +90,10 @@ func (r *tenantRepositoryFake) FindByID(context.Context, string) (*model.Tenant,
 
 func (r *tenantRepositoryFake) ListAccessibleByUserID(context.Context, string) ([]*model.Tenant, error) {
 	return []*model.Tenant{}, nil
+}
+
+func (r *tenantRepositoryFake) UpdateProfile(context.Context, string, repository.TenantProfileUpdate) (*model.Tenant, error) {
+	return nil, nil
 }
 
 type membershipRepositoryFake struct {

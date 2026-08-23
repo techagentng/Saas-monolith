@@ -8,6 +8,7 @@ import (
 
 	authmodel "github.com/techagentng/saas-monolith/internal/authorization/model"
 	tenantmodel "github.com/techagentng/saas-monolith/internal/tenant/model"
+	tenantrepository "github.com/techagentng/saas-monolith/internal/tenant/repository"
 )
 
 func TestApprovedPermissionMatrixResolvesExactSets(t *testing.T) {
@@ -106,4 +107,8 @@ func (*matrixTenants) FindByID(context.Context, string) (*tenantmodel.Tenant, er
 
 func (*matrixTenants) ListAccessibleByUserID(context.Context, string) ([]*tenantmodel.Tenant, error) {
 	return []*tenantmodel.Tenant{}, nil
+}
+
+func (*matrixTenants) UpdateProfile(context.Context, string, tenantrepository.TenantProfileUpdate) (*tenantmodel.Tenant, error) {
+	return nil, nil
 }

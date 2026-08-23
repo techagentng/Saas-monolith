@@ -13,13 +13,14 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
 	identityrepository "github.com/techagentng/saas-monolith/internal/identity/repository"
+	"github.com/techagentng/saas-monolith/internal/tenant/repository"
 )
 
 func TestCreateTenantProvisionsOwnerAtomically(t *testing.T) {
 	db := openTenantServiceTestDB(t)
 	ctx := context.Background()
 	userID := insertTestUser(t, db, "owner@example.com")
-	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db))
+	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
 	tenant, err := svc.Create(ctx, CreateTenantInput{Name: "Acme Salon", Slug: "acme-salon", CreatorUserID: userID})
 	if err != nil {
@@ -50,7 +51,7 @@ func TestCreateTenantRollsBackOnDuplicateSlug(t *testing.T) {
 	db := openTenantServiceTestDB(t)
 	ctx := context.Background()
 	userID := insertTestUser(t, db, "first@example.com")
-	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db))
+	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
 	if _, err := svc.Create(ctx, CreateTenantInput{Name: "First", Slug: "shared-slug", CreatorUserID: userID}); err != nil {
 		t.Fatalf("first Create() error = %v", err)
@@ -69,7 +70,7 @@ func TestCreateTenantRollsBackOnDuplicateSlug(t *testing.T) {
 func TestCreateTenantRollsBackWhenMembershipValidationFails(t *testing.T) {
 	db := openTenantServiceTestDB(t)
 	ctx := context.Background()
-	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db))
+	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
 	// A well-formed but nonexistent creator UUID lets tenant insertion
 	// succeed and then fails inside MembershipService.Create's creator
@@ -100,7 +101,7 @@ func TestCreateTenantRollsBackWhenBusinessOwnerRoleMissing(t *testing.T) {
 	if _, err := db.ExecContext(ctx, `DELETE FROM roles WHERE name = 'BUSINESS_OWNER' AND scope = 'TENANT'`); err != nil {
 		t.Fatalf("removing BUSINESS_OWNER from isolated test schema: %v", err)
 	}
-	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db))
+	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
 	_, err := svc.Create(ctx, CreateTenantInput{Name: "No Owner Role", Slug: "no-owner-role", CreatorUserID: userID})
 	if err == nil {
@@ -138,7 +139,7 @@ func TestCreateTenantRollsBackWhenBusinessOwnerRoleMissing(t *testing.T) {
 func TestCreateTenantRollsBackOnContextCancellation(t *testing.T) {
 	db := openTenantServiceTestDB(t)
 	userID := insertTestUser(t, db, "cancelled@example.com")
-	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db))
+	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -210,6 +211,7 @@ func openTenantServiceTestDB(t *testing.T) *sql.DB {
 		"000001_create_users.up.sql",
 		"000003_create_tenants.up.sql",
 		"000007_add_slug_to_tenants.up.sql",
+		"000008_add_tenant_profile_fields.up.sql",
 		"000004_create_tenant_memberships.up.sql",
 		"000005_create_roles_permissions.up.sql",
 		"000006_seed_roles_permissions.up.sql",
