@@ -21,16 +21,20 @@ func NewTenantHandler(creationService service.TenantService, retrievalService se
 }
 
 type PublicTenant struct {
-	ID           string       `json:"id"`
-	Name         string       `json:"name"`
-	Slug         string       `json:"slug"`
-	Status       model.Status `json:"status"`
-	Description  *string      `json:"description,omitempty"`
-	ContactEmail *string      `json:"contact_email,omitempty"`
-	ContactPhone *string      `json:"contact_phone,omitempty"`
-	Timezone     *string      `json:"timezone,omitempty"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
+	ID     string       `json:"id"`
+	Name   string       `json:"name"`
+	Slug   string       `json:"slug"`
+	Status model.Status `json:"status"`
+	// Optional profile fields keep a stable JSON shape and serialize as null
+	// when unset, matching every other public DTO in the project (none of
+	// which use omitempty for scalar fields). Frontend consumers therefore
+	// see the same tenant key set whether or not a profile has been filled in.
+	Description  *string   `json:"description"`
+	ContactEmail *string   `json:"contact_email"`
+	ContactPhone *string   `json:"contact_phone"`
+	Timezone     *string   `json:"timezone"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // Create provisions a tenant and its initial BUSINESS_OWNER for the

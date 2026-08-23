@@ -17,6 +17,7 @@ import (
 	"github.com/techagentng/saas-monolith/internal/tenant"
 	tenanthandler "github.com/techagentng/saas-monolith/internal/tenant/handler"
 	tenantmodel "github.com/techagentng/saas-monolith/internal/tenant/model"
+	tenantrepository "github.com/techagentng/saas-monolith/internal/tenant/repository"
 	tenantservice "github.com/techagentng/saas-monolith/internal/tenant/service"
 )
 
@@ -269,6 +270,10 @@ func (f *fakeGetTenantRepository) ListAccessibleByUserID(context.Context, string
 		return []*tenantmodel.Tenant{}, nil
 	}
 	return []*tenantmodel.Tenant{f.scenario.tenant}, nil
+}
+
+func (f *fakeGetTenantRepository) UpdateProfile(context.Context, string, tenantrepository.TenantProfileUpdate) (*tenantmodel.Tenant, error) {
+	return nil, apperrors.New(apperrors.CodeInternalError, "not implemented in fake", nil)
 }
 
 type fakeGetTenantMembershipRepository struct{ scenario *getTenantScenario }

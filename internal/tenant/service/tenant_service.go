@@ -154,12 +154,13 @@ func (s *tenantService) UpdateProfile(ctx context.Context, tenantID string, req 
 		update.Name = &name
 	}
 
-	// Validate and prepare description field if provided
+	// Validate and prepare description field if provided. Unlike the other
+	// optional fields, an empty description is a legitimate product state
+	// ("this business has no description"), so it is accepted rather than
+	// rejected. This is not null-clearing: the column is set to the empty
+	// string, and an omitted description still leaves the stored value alone.
 	if req.Description != nil {
 		desc := strings.TrimSpace(*req.Description)
-		if desc == "" {
-			return nil, apperrors.New(apperrors.CodeValidationFailed, "description cannot be empty if provided", nil)
-		}
 		if len(desc) > 1000 {
 			return nil, apperrors.New(apperrors.CodeValidationFailed, "description exceeds maximum length", nil)
 		}

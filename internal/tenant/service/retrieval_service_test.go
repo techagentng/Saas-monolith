@@ -8,6 +8,7 @@ import (
 
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
 	"github.com/techagentng/saas-monolith/internal/tenant/model"
+	"github.com/techagentng/saas-monolith/internal/tenant/repository"
 )
 
 func TestRetrievalServiceListAccessibleReturnsAccessibleTenants(t *testing.T) {
@@ -166,4 +167,8 @@ func (f *fakeTenantRepository) ListAccessibleByUserID(ctx context.Context, userI
 		return nil, f.listAccessibleErr
 	}
 	return f.listAccessibleResult, nil
+}
+
+func (f *fakeTenantRepository) UpdateProfile(context.Context, string, repository.TenantProfileUpdate) (*model.Tenant, error) {
+	return nil, errors.New("not implemented in fake")
 }

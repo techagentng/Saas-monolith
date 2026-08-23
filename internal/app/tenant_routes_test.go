@@ -147,6 +147,13 @@ func (f *fakeTenantService) Create(context.Context, tenantservice.CreateTenantIn
 	return f.tenant, nil
 }
 
+func (f *fakeTenantService) UpdateProfile(context.Context, string, tenantservice.UpdateTenantProfileRequest) (*tenantmodel.Tenant, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.tenant, nil
+}
+
 type fakeRetrievalService struct {
 	tenants []*tenantmodel.Tenant
 	err     error

@@ -10,19 +10,19 @@ import (
 )
 
 func TestCreateTenantRejectsEmptyName(t *testing.T) {
-	service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{})
+	service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{}, &tenantRepositoryFake{})
 	_, err := service.Create(context.Background(), CreateTenantInput{Name: "   ", Slug: "salon", CreatorUserID: testUserID})
 	assertCreateTenantCode(t, err, apperrors.CodeValidationFailed)
 }
 
 func TestCreateTenantRejectsEmptySlug(t *testing.T) {
-	service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{})
+	service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{}, &tenantRepositoryFake{})
 	_, err := service.Create(context.Background(), CreateTenantInput{Name: "Salon", Slug: "   ", CreatorUserID: testUserID})
 	assertCreateTenantCode(t, err, apperrors.CodeValidationFailed)
 }
 
 func TestCreateTenantRejectsInvalidCreatorID(t *testing.T) {
-	service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{})
+	service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{}, &tenantRepositoryFake{})
 	_, err := service.Create(context.Background(), CreateTenantInput{Name: "Salon", Slug: "salon", CreatorUserID: "not-a-uuid"})
 	assertCreateTenantCode(t, err, apperrors.CodeInvalidRequest)
 }

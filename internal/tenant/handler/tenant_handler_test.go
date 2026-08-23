@@ -239,6 +239,12 @@ type tenantServiceFake struct {
 	tenant        *model.Tenant
 	err           error
 	receivedInput service.CreateTenantInput
+
+	updateErr      error
+	updateTenant   *model.Tenant
+	updateCalls    int
+	updateTenantID string
+	updateInput    service.UpdateTenantProfileRequest
 }
 
 func (f *tenantServiceFake) Create(_ context.Context, input service.CreateTenantInput) (*model.Tenant, error) {
@@ -247,6 +253,16 @@ func (f *tenantServiceFake) Create(_ context.Context, input service.CreateTenant
 		return nil, f.err
 	}
 	return f.tenant, nil
+}
+
+func (f *tenantServiceFake) UpdateProfile(_ context.Context, tenantID string, input service.UpdateTenantProfileRequest) (*model.Tenant, error) {
+	f.updateCalls++
+	f.updateTenantID = tenantID
+	f.updateInput = input
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	return f.updateTenant, nil
 }
 
 type fakeRetrievalService struct {
