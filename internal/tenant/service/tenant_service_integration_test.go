@@ -13,6 +13,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
 	identityrepository "github.com/techagentng/saas-monolith/internal/identity/repository"
+	"github.com/techagentng/saas-monolith/internal/tenant/model"
 	"github.com/techagentng/saas-monolith/internal/tenant/repository"
 )
 
@@ -22,12 +23,20 @@ func TestCreateTenantProvisionsOwnerAtomically(t *testing.T) {
 	userID := insertTestUser(t, db, "owner@example.com")
 	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
-	tenant, err := svc.Create(ctx, CreateTenantInput{Name: "Acme Salon", Slug: "acme-salon", CreatorUserID: userID})
+	tenant, err := svc.Create(ctx, CreateTenantInput{Name: "Acme Salon", Slug: "acme-salon", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: userID})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
 	if tenant.Name != "Acme Salon" || tenant.Slug != "acme-salon" {
 		t.Fatalf("tenant = %#v", tenant)
+	}
+	// F1: a successful creation persists the chosen business type and always
+	// starts IN_PROGRESS — there is no COMPLETED path through Create.
+	if tenant.BusinessType == nil || *tenant.BusinessType != model.BusinessTypeNailTechnician {
+		t.Fatalf("BusinessType = %v, want NAIL_TECHNICIAN", tenant.BusinessType)
+	}
+	if tenant.OnboardingStatus != model.OnboardingStatusInProgress {
+		t.Fatalf("OnboardingStatus = %q, want IN_PROGRESS", tenant.OnboardingStatus)
 	}
 
 	var membershipStatus string
@@ -53,12 +62,12 @@ func TestCreateTenantRollsBackOnDuplicateSlug(t *testing.T) {
 	userID := insertTestUser(t, db, "first@example.com")
 	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
-	if _, err := svc.Create(ctx, CreateTenantInput{Name: "First", Slug: "shared-slug", CreatorUserID: userID}); err != nil {
+	if _, err := svc.Create(ctx, CreateTenantInput{Name: "First", Slug: "shared-slug", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: userID}); err != nil {
 		t.Fatalf("first Create() error = %v", err)
 	}
 
 	secondUserID := insertTestUser(t, db, "second@example.com")
-	_, err := svc.Create(ctx, CreateTenantInput{Name: "Second", Slug: "shared-slug", CreatorUserID: secondUserID})
+	_, err := svc.Create(ctx, CreateTenantInput{Name: "Second", Slug: "shared-slug", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: secondUserID})
 	var appErr *apperrors.AppError
 	if !errors.As(err, &appErr) || appErr.Code != apperrors.CodeTenantSlugTaken {
 		t.Fatalf("error = %v, want TENANT_SLUG_TAKEN", err)
@@ -76,7 +85,7 @@ func TestCreateTenantRollsBackWhenMembershipValidationFails(t *testing.T) {
 	// succeed and then fails inside MembershipService.Create's creator
 	// existence check — proving the just-inserted tenant is rolled back.
 	nonexistentUserID := uuid.NewString()
-	_, err := svc.Create(ctx, CreateTenantInput{Name: "Orphan", Slug: "orphan-slug", CreatorUserID: nonexistentUserID})
+	_, err := svc.Create(ctx, CreateTenantInput{Name: "Orphan", Slug: "orphan-slug", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: nonexistentUserID})
 	if err == nil {
 		t.Fatal("Create() succeeded with nonexistent creator, want error")
 	}
@@ -103,7 +112,7 @@ func TestCreateTenantRollsBackWhenBusinessOwnerRoleMissing(t *testing.T) {
 	}
 	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
-	_, err := svc.Create(ctx, CreateTenantInput{Name: "No Owner Role", Slug: "no-owner-role", CreatorUserID: userID})
+	_, err := svc.Create(ctx, CreateTenantInput{Name: "No Owner Role", Slug: "no-owner-role", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: userID})
 	if err == nil {
 		t.Fatal("Create() succeeded despite missing BUSINESS_OWNER role, want error")
 	}
@@ -143,7 +152,7 @@ func TestCreateTenantRollsBackOnContextCancellation(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := svc.Create(ctx, CreateTenantInput{Name: "Cancelled", Slug: "cancelled-slug", CreatorUserID: userID})
+	_, err := svc.Create(ctx, CreateTenantInput{Name: "Cancelled", Slug: "cancelled-slug", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: userID})
 	if err == nil {
 		t.Fatal("Create() succeeded with a cancelled context, want error")
 	}
@@ -212,6 +221,7 @@ func openTenantServiceTestDB(t *testing.T) *sql.DB {
 		"000003_create_tenants.up.sql",
 		"000007_add_slug_to_tenants.up.sql",
 		"000008_add_tenant_profile_fields.up.sql",
+		"000009_add_business_type_and_onboarding_to_tenants.up.sql",
 		"000004_create_tenant_memberships.up.sql",
 		"000005_create_roles_permissions.up.sql",
 		"000006_seed_roles_permissions.up.sql",

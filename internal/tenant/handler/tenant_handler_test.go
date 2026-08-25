@@ -81,6 +81,44 @@ func TestCreateTenantHandlerReturns201OnSuccess(t *testing.T) {
 	}
 }
 
+// F1: the decode target only ever has a field for business_type — there is
+// no field for onboarding_status, onboarding_step, or any owner/role
+// identifier, so a client attempting to smuggle any of them in has them
+// silently discarded regardless of decoder strictness, the same protection
+// TestCreateTenantHandlerUsesAuthenticatedCreatorNeverRequestBody already
+// proves for ownership.
+func TestCreateTenantHandlerAcceptsBusinessTypeAndIgnoresOnboardingFields(t *testing.T) {
+	fake := &tenantServiceFake{tenant: &model.Tenant{ID: "tenant-1", Name: "Hotel Co", Slug: "hotel-co", Status: model.StatusActive}}
+	handler := NewTenantHandler(fake, &fakeRetrievalService{})
+	recorder := httptest.NewRecorder()
+	request := authenticatedTenantRequest(t, `{"name":"Hotel Co","slug":"hotel-co","business_type":"HOTEL","onboarding_status":"COMPLETED","onboarding_step":"review"}`)
+
+	handler.Create(recorder, request)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s, want 201", recorder.Code, recorder.Body.String())
+	}
+	if fake.receivedInput.BusinessType != "HOTEL" {
+		t.Fatalf("BusinessType = %q, want %q from the request body", fake.receivedInput.BusinessType, "HOTEL")
+	}
+	// CreateTenantInput has no onboarding_status/onboarding_step field at
+	// all, so there is nothing further to assert here beyond the fact that
+	// this compiles and the request succeeds — the absence of those fields
+	// on the struct itself is the enforcement.
+}
+
+func TestCreateTenantHandlerPropagatesInvalidBusinessType(t *testing.T) {
+	handler := NewTenantHandler(&tenantServiceFake{err: apperrors.New(apperrors.CodeValidationFailed, "invalid business type", nil)}, &fakeRetrievalService{})
+	recorder := httptest.NewRecorder()
+	request := authenticatedTenantRequest(t, `{"name":"Salon","slug":"salon","business_type":"BARBERSHOP"}`)
+
+	handler.Create(recorder, request)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 VALIDATION_FAILED, body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestCreateTenantHandlerPropagatesSlugTaken(t *testing.T) {
 	handler := NewTenantHandler(&tenantServiceFake{err: apperrors.New(apperrors.CodeTenantSlugTaken, "tenant slug is already taken", nil)}, &fakeRetrievalService{})
 	recorder := httptest.NewRecorder()
@@ -194,6 +232,57 @@ func TestGetByIDTenantHandlerReturnsServiceTenantAs200(t *testing.T) {
 	}
 	if retrieval.receivedGetUser != testCreatorID || retrieval.receivedGetID != "tenant-1" {
 		t.Fatalf("service received userID=%q tenantID=%q, want principal=%q tenantID=%q", retrieval.receivedGetUser, retrieval.receivedGetID, testCreatorID, "tenant-1")
+	}
+}
+
+// F1: GetByID's response (an owner/authenticated representation, distinct
+// from the anonymous public tenant identity endpoint) must actually carry
+// business_type/onboarding_status/onboarding_step when the tenant has them
+// — this is what future F4/F7 will read.
+func TestGetByIDTenantHandlerIncludesBusinessTypeAndOnboardingState(t *testing.T) {
+	now := time.Now()
+	businessType := model.BusinessTypeHotel
+	step := "room_types"
+	tenant := &model.Tenant{
+		ID: "tenant-1", Name: "Hotel Co", Slug: "hotel-co", Status: model.StatusActive,
+		BusinessType: &businessType, OnboardingStatus: model.OnboardingStatusInProgress, OnboardingStep: &step,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	retrieval := &fakeRetrievalService{tenant: tenant}
+	handler := NewTenantHandler(&tenantServiceFake{}, retrieval)
+	recorder := httptest.NewRecorder()
+	request := authenticatedGetRequest(t, http.MethodGet, "/api/v1/tenants/tenant-1")
+
+	handler.GetByID(recorder, request, "tenant-1")
+
+	var body PublicTenant
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v, body=%s", err, recorder.Body.String())
+	}
+	if body.BusinessType == nil || *body.BusinessType != model.BusinessTypeHotel {
+		t.Fatalf("BusinessType = %v, want HOTEL", body.BusinessType)
+	}
+	if body.OnboardingStatus != model.OnboardingStatusInProgress {
+		t.Fatalf("OnboardingStatus = %q, want IN_PROGRESS", body.OnboardingStatus)
+	}
+	if body.OnboardingStep == nil || *body.OnboardingStep != "room_types" {
+		t.Fatalf("OnboardingStep = %v, want room_types", body.OnboardingStep)
+	}
+}
+
+// F1: a legacy tenant with no business_type must serialize as a null field,
+// not omit the key or fail — the majority case for every pre-F1 tenant.
+func TestGetByIDTenantHandlerSerializesNilBusinessTypeAsNull(t *testing.T) {
+	tenant := &model.Tenant{ID: "tenant-1", Name: "Legacy", Slug: "legacy", Status: model.StatusActive, OnboardingStatus: model.OnboardingStatusCompleted}
+	retrieval := &fakeRetrievalService{tenant: tenant}
+	handler := NewTenantHandler(&tenantServiceFake{}, retrieval)
+	recorder := httptest.NewRecorder()
+	request := authenticatedGetRequest(t, http.MethodGet, "/api/v1/tenants/tenant-1")
+
+	handler.GetByID(recorder, request, "tenant-1")
+
+	if !strings.Contains(recorder.Body.String(), `"business_type":null`) {
+		t.Fatalf("body = %s, want business_type key present and null", recorder.Body.String())
 	}
 }
 

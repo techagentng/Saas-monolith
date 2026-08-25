@@ -18,6 +18,17 @@ type Tenant struct {
 	ContactEmail *string
 	ContactPhone *string
 	Timezone     *string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// BusinessType is nil only for tenants created before this field
+	// existed; every tenant created through TenantService.Create from here
+	// on has one. It is immutable — see BusinessType's own doc comment.
+	BusinessType *BusinessType
+	// OnboardingStatus is never empty for a persisted tenant: the
+	// repository defaults it the same way it already defaults Status.
+	OnboardingStatus OnboardingStatus
+	// OnboardingStep is a free-form resume pointer, not a typed enum — the
+	// valid values depend on BusinessType and are validated at the service
+	// layer, not here. Nil until onboarding progress has been saved.
+	OnboardingStep *string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }

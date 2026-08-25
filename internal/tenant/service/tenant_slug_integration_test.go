@@ -91,7 +91,7 @@ func TestCreateTenantWithValidSlugRemainsAtomicAndPubliclyResolvable(t *testing.
 	tenants := repository.NewPostgresTenantRepository(db)
 	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), tenants)
 
-	tenant, err := svc.Create(ctx, CreateTenantInput{Name: "Acme Beauty Studio", Slug: "acme-beauty-studio", CreatorUserID: userID})
+	tenant, err := svc.Create(ctx, CreateTenantInput{Name: "Acme Beauty Studio", Slug: "acme-beauty-studio", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: userID})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
@@ -132,11 +132,11 @@ func TestCreateTenantDuplicateSlugStillReportsSlugTaken(t *testing.T) {
 	secondUser := insertTestUser(t, db, "dup-second@example.com")
 	svc := NewTenantService(db, identityrepository.NewPostgresUserRepository(db), repository.NewPostgresTenantRepository(db))
 
-	if _, err := svc.Create(ctx, CreateTenantInput{Name: "First", Slug: "taken-slug", CreatorUserID: firstUser}); err != nil {
+	if _, err := svc.Create(ctx, CreateTenantInput{Name: "First", Slug: "taken-slug", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: firstUser}); err != nil {
 		t.Fatalf("first Create() error = %v", err)
 	}
 
-	_, err := svc.Create(ctx, CreateTenantInput{Name: "Second", Slug: "taken-slug", CreatorUserID: secondUser})
+	_, err := svc.Create(ctx, CreateTenantInput{Name: "Second", Slug: "taken-slug", BusinessType: "NAIL_TECHNICIAN", CreatorUserID: secondUser})
 	var appErr *apperrors.AppError
 	if !errors.As(err, &appErr) || appErr.Code != apperrors.CodeTenantSlugTaken {
 		t.Fatalf("duplicate slug error = %v, want TENANT_SLUG_TAKEN", err)

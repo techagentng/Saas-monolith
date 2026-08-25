@@ -20,9 +20,16 @@ import (
 // CreateTenantInput carries the transport-validated tenant creation request.
 // CreatorUserID must come from the authenticated principal, never a request
 // body field — the caller of Create is responsible for that boundary.
+//
+// BusinessType is required as of the Vertical Onboarding F1 contract
+// evolution: every tenant created through this method has one, validated
+// below against model.ValidateBusinessType's fixed allow-list. It is
+// immutable once set — UpdateTenantProfileRequest has no field for it, and
+// no other endpoint in this codebase writes it.
 type CreateTenantInput struct {
 	Name          string
 	Slug          string
+	BusinessType  string
 	CreatorUserID string
 }
 
@@ -78,6 +85,17 @@ func (s *tenantService) Create(ctx context.Context, input CreateTenantInput) (*m
 	if _, err := uuid.Parse(input.CreatorUserID); err != nil {
 		return nil, apperrors.New(apperrors.CodeInvalidRequest, "invalid request", err)
 	}
+	// Validated last among the pre-transaction checks (after name, slug, and
+	// creator ID) purely to keep this check's own error path independent of
+	// theirs — every failure above still short-circuits before this runs, so
+	// an invalid business_type on an otherwise-invalid request always
+	// surfaces as whichever error was already established for that field. An
+	// invalid business_type never opens a transaction: no tenant,
+	// membership, or role assignment can result from it.
+	businessType, err := model.ValidateBusinessType(input.BusinessType)
+	if err != nil {
+		return nil, err
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -95,7 +113,11 @@ func (s *tenantService) Create(ctx context.Context, input CreateTenantInput) (*m
 	roles := authzrepository.NewPostgresRoleRepository(tx)
 	userRoles := authzrepository.NewPostgresUserRoleRepository(tx)
 
-	tenant, err := tenants.Create(ctx, &model.Tenant{ID: uuid.NewString(), Name: name, Slug: slug})
+	// OnboardingStatus is left unset here so PostgresTenantRepository.Create's
+	// own defaulting (mirroring its existing empty-Status-becomes-ACTIVE
+	// pattern) applies, producing IN_PROGRESS. There is no COMPLETED path
+	// through this method — onboarding completion belongs to a later feature.
+	tenant, err := tenants.Create(ctx, &model.Tenant{ID: uuid.NewString(), Name: name, Slug: slug, BusinessType: &businessType})
 	if err != nil {
 		return nil, err
 	}

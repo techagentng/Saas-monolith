@@ -25,6 +25,7 @@ type Config struct {
 	SessionLifetime  time.Duration
 	PrivateKey       ed25519.PrivateKey
 	PublicKey        ed25519.PublicKey
+	AllowedOrigins   []string
 }
 
 func Load() (Config, error) { return load(os.LookupEnv) }
@@ -55,6 +56,7 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	if c.SessionLifetime, err = duration(lookup, "SESSION_TTL", 24*time.Hour); err != nil {
 		return Config{}, err
 	}
+	c.AllowedOrigins = originList(lookup, "ALLOWED_ORIGINS")
 	privateValue := get(lookup, "ED25519_PRIVATE_KEY", "")
 	publicValue := get(lookup, "ED25519_PUBLIC_KEY", "")
 	privateSet, publicSet := privateValue != "", publicValue != ""
@@ -104,6 +106,20 @@ func duration(lookup func(string) (string, bool), key string, fallback time.Dura
 		return 0, fmt.Errorf("%s must be a positive duration", key)
 	}
 	return parsed, nil
+}
+
+func originList(lookup func(string) (string, bool), key string) []string {
+	raw := get(lookup, key, "")
+	if raw == "" {
+		return nil
+	}
+	var origins []string
+	for _, part := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			origins = append(origins, trimmed)
+		}
+	}
+	return origins
 }
 
 func decodeKey(value string, size int) ([]byte, error) {

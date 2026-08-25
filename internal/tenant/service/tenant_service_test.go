@@ -51,6 +51,26 @@ func TestCreateTenantRejectsInvalidCreatorID(t *testing.T) {
 	assertCreateTenantCode(t, err, apperrors.CodeInvalidRequest)
 }
 
+// F1: business_type is validated last among the pre-transaction checks, so
+// these cases deliberately supply an otherwise-fully-valid request — a
+// missing/invalid business_type on its own, with nothing else wrong, must
+// still be caught before BeginTx.
+func TestCreateTenantRejectsMissingBusinessTypeBeforeTransaction(t *testing.T) {
+	service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{}, &tenantRepositoryFake{})
+	_, err := service.Create(context.Background(), CreateTenantInput{Name: "Salon", Slug: "salon", CreatorUserID: testUserID})
+	assertCreateTenantCode(t, err, apperrors.CodeValidationFailed)
+}
+
+func TestCreateTenantRejectsUnknownBusinessTypeBeforeTransaction(t *testing.T) {
+	for _, businessType := range []string{"HOTEL ", "barbershop", "SUPER_ADMIN"} {
+		t.Run(businessType, func(t *testing.T) {
+			service := NewTenantService(&panicOnBeginTx{t: t}, &userRepositoryFake{}, &tenantRepositoryFake{})
+			_, err := service.Create(context.Background(), CreateTenantInput{Name: "Salon", Slug: "salon", BusinessType: businessType, CreatorUserID: testUserID})
+			assertCreateTenantCode(t, err, apperrors.CodeValidationFailed)
+		})
+	}
+}
+
 func assertCreateTenantCode(t *testing.T, err error, expected apperrors.ErrorCode) {
 	t.Helper()
 	var appErr *apperrors.AppError
