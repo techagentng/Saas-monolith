@@ -60,15 +60,13 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	assignmentService := authzservice.NewAssignmentService(users, tenants, roles, userRoles, memberships)
 	roleAssignmentService := authzservice.NewTenantRoleAssignmentService(authorizer, roles, assignmentService)
 	roleAssignmentHandler := authzhandler.NewRoleAssignmentHandler(roleAssignmentService)
+	permissionsHandler := authzhandler.NewPermissionsHandler(permissionResolution)
 
 	api := http.NewServeMux()
 	api.HandleFunc("GET /health", health)
 	api.HandleFunc("POST /api/v1/auth/login", authenticationHandler.Login)
 	api.HandleFunc("POST /api/v1/auth/refresh", authenticationHandler.Refresh)
 	api.HandleFunc("POST /api/v1/users", userHandler.Create)
-	api.HandleFunc("GET /api/v1/users/{id}", func(writer http.ResponseWriter, request *http.Request) {
-		userHandler.GetByID(writer, request, request.PathValue("id"))
-	})
 	// Public tenant identity (Feature 5): resolve a tenant by its public slug.
 	// This route is intentionally anonymous — no authentication, no tenant
 	// context, and no permission middleware — because the slug IS the public
@@ -83,6 +81,15 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	authMiddleware := auth.Middleware{Tokens: tokens, Sessions: sessions}
 	tenantMiddleware := tenant.Middleware{Resolver: contextService}
 	api.Handle("POST /api/v1/auth/logout", authMiddleware.Wrap(http.HandlerFunc(authenticationHandler.Logout)))
+
+	// User retrieval (safety correction): self-only. GetByID requires
+	// authentication and only ever returns the caller's own record — see the
+	// comment on UserHandler.GetByID for why this is self-only rather than
+	// tenant-scoped or platform-admin-controlled. Registered separately from
+	// POST /api/v1/users, which must stay anonymous for registration.
+	api.Handle("GET /api/v1/users/{id}", authMiddleware.Wrap(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		userHandler.GetByID(writer, request, request.PathValue("id"))
+	})))
 	api.Handle("GET /api/v1/tenants/{tenantID}/context", authMiddleware.Wrap(tenantContextHandler(contextService)))
 
 	// Tenant creation (Feature 2): any authenticated user may create a
@@ -140,6 +147,20 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 				roleAssignmentHandler.Assign(writer, request, request.PathValue("tenantID"))
 			}),
 		),
+	)))
+
+	// Effective tenant permissions (frontend F11 dependency): lets the
+	// authenticated caller read their own effective permission set for the
+	// selected tenant, e.g. to answer can("tenant.update") client-side. This
+	// is a self-capability read, not a gate on one permission, so it carries
+	// no TenantPermissionMiddleware — it reuses the same PermissionResolutionService
+	// that middleware relies on and reports whatever that resolves to,
+	// including an empty set for a member with no granted permissions.
+	// Ordering: Authentication -> Tenant Context -> Handler.
+	api.Handle("GET /api/v1/tenants/{tenantID}/permissions", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			permissionsHandler.GetEffective(writer, request, request.PathValue("tenantID"))
+		}),
 	)))
 
 	return &Application{db: db, Server: &http.Server{Addr: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), Handler: api, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}}, nil

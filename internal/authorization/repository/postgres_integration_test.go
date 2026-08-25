@@ -33,26 +33,42 @@ func TestRBACMigrationsCreateConstraintsAndSeedDefinitions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Cleanup for each object is deferred immediately after it is created,
+	// not batched at the end of the function. A t.Fatal on any later step
+	// (a failed migration file, a failed assertion) calls runtime.Goexit,
+	// which only runs defers already registered — batching them at the end
+	// left a t.Fatal on the migration files a chance to strand these stub
+	// users/tenants tables permanently in a database this test doesn't own
+	// (whatever TEST_DATABASE_URL/DATABASE_URL happened to point at), since
+	// none of the drops would have been registered yet.
 	for _, query := range []string{"CREATE TABLE users (id UUID PRIMARY KEY)", "CREATE TABLE tenants (id UUID PRIMARY KEY)"} {
 		if _, err := db.ExecContext(ctx, query); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"000005_create_roles_permissions.up.sql", "000006_seed_roles_permissions.up.sql"} {
-		data, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.ExecContext(ctx, string(data)); err != nil {
-			t.Fatalf("migration %s: %v", name, err)
-		}
+	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS tenants")
+	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS users")
+
+	rolesMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "000005_create_roles_permissions.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, string(rolesMigration)); err != nil {
+		t.Fatalf("migration 000005_create_roles_permissions.up.sql: %v", err)
 	}
 	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS user_roles")
 	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS role_permissions")
 	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS permissions")
 	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS roles")
-	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS tenants")
-	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS users")
+
+	seedMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "000006_seed_roles_permissions.up.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, string(seedMigration)); err != nil {
+		t.Fatalf("migration 000006_seed_roles_permissions.up.sql: %v", err)
+	}
+
 	var roles, permissions int
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM roles").Scan(&roles); err != nil {
 		t.Fatal(err)
