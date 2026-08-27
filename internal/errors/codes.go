@@ -14,6 +14,7 @@ const (
 	CodeResourceNotFound              ErrorCode = "RESOURCE_NOT_FOUND"
 	CodeUserNotFound                  ErrorCode = "USER_NOT_FOUND"
 	CodeTenantNotFound                ErrorCode = "TENANT_NOT_FOUND"
+	CodeServiceNotFound               ErrorCode = "SERVICE_NOT_FOUND"
 	CodeTenantSlugTaken               ErrorCode = "TENANT_SLUG_TAKEN"
 	CodeTenantSlugInvalid             ErrorCode = "TENANT_SLUG_INVALID"
 	CodeUserAlreadyExists             ErrorCode = "USER_ALREADY_EXISTS"

@@ -18,6 +18,9 @@ import (
 	identityhandler "github.com/techagentng/saas-monolith/internal/identity/handler"
 	identityrepository "github.com/techagentng/saas-monolith/internal/identity/repository"
 	identityservice "github.com/techagentng/saas-monolith/internal/identity/service"
+	schedulinghandler "github.com/techagentng/saas-monolith/internal/scheduling/handler"
+	schedulingrepository "github.com/techagentng/saas-monolith/internal/scheduling/repository"
+	schedulingservice "github.com/techagentng/saas-monolith/internal/scheduling/service"
 	"github.com/techagentng/saas-monolith/internal/tenant"
 	tenanthandler "github.com/techagentng/saas-monolith/internal/tenant/handler"
 	tenantrepository "github.com/techagentng/saas-monolith/internal/tenant/repository"
@@ -61,6 +64,15 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	publicTenantHandler := tenanthandler.NewPublicTenantHandler(publicTenantService)
 	onboardingService := tenantservice.NewOnboardingService(tenants)
 	onboardingHandler := tenanthandler.NewOnboardingHandler(onboardingService)
+	currencyService := tenantservice.NewCurrencyService(tenants)
+	currencyHandler := tenanthandler.NewCurrencyHandler(currencyService)
+
+	// Scheduling S1: the appointment-style service catalog. The module reads
+	// the tenant only to resolve its currency before a price is accepted, so it
+	// is handed the tenant repository through its own narrow TenantReader
+	// interface rather than the whole tenant service.
+	catalogService := schedulingservice.NewCatalogService(schedulingrepository.NewPostgresServiceRepository(db), tenants)
+	serviceHandler := schedulinghandler.NewServiceHandler(catalogService)
 
 	roles := authzrepository.NewPostgresRoleRepository(db)
 	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
@@ -153,6 +165,67 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "tenant.update"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				onboardingHandler.Complete(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+
+	// Tenant currency (Scheduling S1): a write-once declaration of the currency
+	// every price in this tenant is denominated in. Deliberately its own
+	// endpoint rather than a field on PATCH /tenants/{tenantID} — see
+	// CurrencyService for why a write-once value does not belong in a
+	// partial-update request shape. It carries tenant.update, the same
+	// permission that already governs changing tenant-level settings.
+	// Ordering: Authentication -> Tenant Context -> Authorization (tenant.update) -> Handler
+	api.Handle("PUT /api/v1/tenants/{tenantID}/currency", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "tenant.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				currencyHandler.Set(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+
+	// Scheduling S1 service catalog (tenant-management only — the anonymous
+	// public catalog is S8 and is deliberately not registered here).
+	//
+	// Route authorization matrix:
+	//   POST   /api/v1/tenants/{tenantID}/services                     TENANT  service.create
+	//   GET    /api/v1/tenants/{tenantID}/services                     TENANT  service.read
+	//   GET    /api/v1/tenants/{tenantID}/services/{serviceID}         TENANT  service.read
+	//   PATCH  /api/v1/tenants/{tenantID}/services/{serviceID}         TENANT  service.update
+	//   POST   /api/v1/tenants/{tenantID}/services/{serviceID}/archive TENANT  service.archive
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	api.Handle("POST /api/v1/tenants/{tenantID}/services", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.create"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				serviceHandler.Create(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/services", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				serviceHandler.List(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/services/{serviceID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				serviceHandler.Get(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+	api.Handle("PATCH /api/v1/tenants/{tenantID}/services/{serviceID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				serviceHandler.Update(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+	api.Handle("POST /api/v1/tenants/{tenantID}/services/{serviceID}/archive", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.archive"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				serviceHandler.Archive(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
 			}),
 		),
 	)))

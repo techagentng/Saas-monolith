@@ -300,10 +300,13 @@ func openTenantTestDB(t *testing.T) *sql.DB {
 	if err := db.PingContext(ctx); err != nil {
 		t.Skipf("database is unavailable: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS tenants"); err != nil {
-		t.Fatalf("cleaning tenants table: %v", err)
+	// services references tenants (Scheduling S1), so it must go first.
+	for _, table := range []string{"services", "tenants"} {
+		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
+			t.Fatalf("cleaning %s table: %v", table, err)
+		}
 	}
-	for _, migration := range []string{"000003_create_tenants.up.sql", "000007_add_slug_to_tenants.up.sql", "000008_add_tenant_profile_fields.up.sql", "000009_add_business_type_and_onboarding_to_tenants.up.sql"} {
+	for _, migration := range []string{"000003_create_tenants.up.sql", "000007_add_slug_to_tenants.up.sql", "000008_add_tenant_profile_fields.up.sql", "000009_add_business_type_and_onboarding_to_tenants.up.sql", "000010_create_services_and_tenant_currency.up.sql"} {
 		contents, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", migration))
 		if err != nil {
 			t.Fatalf("reading migration %s: %v", migration, err)
@@ -312,7 +315,10 @@ func openTenantTestDB(t *testing.T) *sql.DB {
 			t.Fatalf("applying migration %s: %v", migration, err)
 		}
 	}
-	t.Cleanup(func() { db.ExecContext(context.Background(), "DROP TABLE IF EXISTS tenants") })
+	t.Cleanup(func() {
+		db.ExecContext(context.Background(), "DROP TABLE IF EXISTS services")
+		db.ExecContext(context.Background(), "DROP TABLE IF EXISTS tenants")
+	})
 	return db
 }
 
@@ -334,12 +340,12 @@ func openTenantTestDBWithMemberships(t *testing.T) *sql.DB {
 	if err := db.PingContext(ctx); err != nil {
 		t.Skipf("database is unavailable: %v", err)
 	}
-	for _, table := range []string{"tenant_memberships", "tenants", "users"} {
+	for _, table := range []string{"services", "tenant_memberships", "tenants", "users"} {
 		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
 			t.Fatalf("cleaning %s table: %v", table, err)
 		}
 	}
-	for _, migration := range []string{"000001_create_users.up.sql", "000003_create_tenants.up.sql", "000004_create_tenant_memberships.up.sql", "000007_add_slug_to_tenants.up.sql", "000008_add_tenant_profile_fields.up.sql", "000009_add_business_type_and_onboarding_to_tenants.up.sql"} {
+	for _, migration := range []string{"000001_create_users.up.sql", "000003_create_tenants.up.sql", "000004_create_tenant_memberships.up.sql", "000007_add_slug_to_tenants.up.sql", "000008_add_tenant_profile_fields.up.sql", "000009_add_business_type_and_onboarding_to_tenants.up.sql", "000010_create_services_and_tenant_currency.up.sql"} {
 		contents, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", migration))
 		if err != nil {
 			t.Fatalf("reading migration %s: %v", migration, err)
@@ -349,7 +355,7 @@ func openTenantTestDBWithMemberships(t *testing.T) *sql.DB {
 		}
 	}
 	t.Cleanup(func() {
-		for _, table := range []string{"tenant_memberships", "tenants", "users"} {
+		for _, table := range []string{"services", "tenant_memberships", "tenants", "users"} {
 			db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+table)
 		}
 	})

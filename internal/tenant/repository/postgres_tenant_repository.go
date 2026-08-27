@@ -71,7 +71,7 @@ func isSlugUniqueViolation(err error) bool {
 // tenantColumns is the full column set every tenant-row SELECT below reads,
 // kept as one constant so the three query strings and scanTenant's argument
 // order can't silently drift apart from each other.
-const tenantColumns = "id, name, slug, status, description, contact_email, contact_phone, timezone, business_type, onboarding_status, onboarding_step, created_at, updated_at"
+const tenantColumns = "id, name, slug, status, description, contact_email, contact_phone, timezone, business_type, onboarding_status, onboarding_step, currency, created_at, updated_at"
 
 // scanner is satisfied by both *sql.Row and *sql.Rows, letting FindByID,
 // FindBySlug, and each row of ListAccessibleByUserID share one scan routine
@@ -92,7 +92,7 @@ func scanTenant(row scanner) (*model.Tenant, error) {
 		&tenant.ID, &tenant.Name, &tenant.Slug, &tenant.Status,
 		&tenant.Description, &tenant.ContactEmail, &tenant.ContactPhone, &tenant.Timezone,
 		&businessType, &tenant.OnboardingStatus, &tenant.OnboardingStep,
-		&tenant.CreatedAt, &tenant.UpdatedAt,
+		&tenant.Currency, &tenant.CreatedAt, &tenant.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
@@ -136,7 +136,7 @@ func (r *PostgresTenantRepository) FindBySlug(ctx context.Context, slug string) 
 // Results are ordered by created_at ASC, then id ASC for deterministic results.
 // Uses a single JOIN query to avoid N+1 lookups.
 func (r *PostgresTenantRepository) ListAccessibleByUserID(ctx context.Context, userID string) ([]*model.Tenant, error) {
-	qualified := "t.id, t.name, t.slug, t.status, t.description, t.contact_email, t.contact_phone, t.timezone, t.business_type, t.onboarding_status, t.onboarding_step, t.created_at, t.updated_at"
+	qualified := "t.id, t.name, t.slug, t.status, t.description, t.contact_email, t.contact_phone, t.timezone, t.business_type, t.onboarding_status, t.onboarding_step, t.currency, t.created_at, t.updated_at"
 	rows, err := r.db.QueryContext(ctx, `
 SELECT DISTINCT `+qualified+`
 FROM tenants t
@@ -257,6 +257,23 @@ func (r *PostgresTenantRepository) CompleteOnboarding(ctx context.Context, tenan
 	}
 	if err != nil {
 		return nil, fmt.Errorf("completing onboarding: %w", err)
+	}
+	return tenant, nil
+}
+
+// SetCurrency writes only the currency column. Like UpdateOnboardingStep, its
+// SET clause has no other column to write, which is what structurally
+// guarantees it cannot touch anything else. It is unconditional at the SQL
+// level: whether the tenant already has a currency, and whether changing it is
+// allowed, are CurrencyService.Set's decisions, not this layer's.
+func (r *PostgresTenantRepository) SetCurrency(ctx context.Context, tenantID string, currency string) (*model.Tenant, error) {
+	row := r.db.QueryRowContext(ctx, "UPDATE tenants SET currency = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING "+tenantColumns, currency, tenantID)
+	tenant, err := scanTenant(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("setting tenant currency: %w", err)
 	}
 	return tenant, nil
 }

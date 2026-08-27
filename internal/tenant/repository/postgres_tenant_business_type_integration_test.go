@@ -62,6 +62,8 @@ func TestMigration000009PreservesExistingTenantRows(t *testing.T) {
 	}
 
 	applyMigrationFile(t, db, "000009_add_business_type_and_onboarding_to_tenants.up.sql")
+	// Scheduling S1 added tenants.currency, which every tenant SELECT now reads.
+	applyMigrationFile(t, db, "000010_create_services_and_tenant_currency.up.sql")
 
 	repo := NewPostgresTenantRepository(db)
 	tenant, err := repo.FindByID(ctx, tenantID)
@@ -293,13 +295,19 @@ func openTenantTestDBAtMigration000008(t *testing.T) *sql.DB {
 	if err := db.PingContext(ctx); err != nil {
 		t.Skipf("database is unavailable: %v", err)
 	}
-	if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS tenants"); err != nil {
-		t.Fatalf("cleaning tenants table: %v", err)
+	// services references tenants (Scheduling S1), so it must go first.
+	for _, table := range []string{"services", "tenants"} {
+		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
+			t.Fatalf("cleaning %s table: %v", table, err)
+		}
 	}
 	for _, migration := range []string{"000003_create_tenants.up.sql", "000007_add_slug_to_tenants.up.sql", "000008_add_tenant_profile_fields.up.sql"} {
 		applyMigrationFile(t, db, migration)
 	}
-	t.Cleanup(func() { db.ExecContext(context.Background(), "DROP TABLE IF EXISTS tenants") })
+	t.Cleanup(func() {
+		db.ExecContext(context.Background(), "DROP TABLE IF EXISTS services")
+		db.ExecContext(context.Background(), "DROP TABLE IF EXISTS tenants")
+	})
 	return db
 }
 

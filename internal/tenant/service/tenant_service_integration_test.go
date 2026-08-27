@@ -211,7 +211,7 @@ func openTenantServiceTestDB(t *testing.T) *sql.DB {
 	if err := db.PingContext(ctx); err != nil {
 		t.Skipf("database is unavailable: %v", err)
 	}
-	for _, table := range []string{"user_roles", "role_permissions", "permissions", "roles", "tenant_memberships", "tenants", "users"} {
+	for _, table := range []string{"services", "user_roles", "role_permissions", "permissions", "roles", "tenant_memberships", "tenants", "users"} {
 		if _, err := db.ExecContext(ctx, "DROP TABLE IF EXISTS "+table); err != nil {
 			t.Fatalf("cleaning %s table: %v", table, err)
 		}
@@ -225,6 +225,9 @@ func openTenantServiceTestDB(t *testing.T) *sql.DB {
 		"000004_create_tenant_memberships.up.sql",
 		"000005_create_roles_permissions.up.sql",
 		"000006_seed_roles_permissions.up.sql",
+		// Scheduling S1 added tenants.currency, which every tenant SELECT now
+		// reads; without it these fixtures build a table the repository cannot scan.
+		"000010_create_services_and_tenant_currency.up.sql",
 	}
 	for _, migration := range migrationFiles {
 		contents, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", migration))
@@ -237,7 +240,7 @@ func openTenantServiceTestDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() {
 		cleanupCtx := context.Background()
-		for _, table := range []string{"user_roles", "role_permissions", "permissions", "roles", "tenant_memberships", "tenants", "users"} {
+		for _, table := range []string{"services", "user_roles", "role_permissions", "permissions", "roles", "tenant_memberships", "tenants", "users"} {
 			_, _ = db.ExecContext(cleanupCtx, "DROP TABLE IF EXISTS "+table)
 		}
 	})

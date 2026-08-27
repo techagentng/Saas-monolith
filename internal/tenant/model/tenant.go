@@ -29,6 +29,13 @@ type Tenant struct {
 	// valid values depend on BusinessType and are validated at the service
 	// layer, not here. Nil until onboarding progress has been saved.
 	OnboardingStep *string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	// Currency is the ISO 4217 code every price this tenant sets is
+	// denominated in (Scheduling S1). It is nil until the tenant declares one
+	// and is write-once thereafter — see CurrencyService.Set for why changing
+	// it would silently reinterpret every stored amount. It is deliberately
+	// absent from UpdateTenantProfileRequest, so no ordinary profile PATCH can
+	// reach it.
+	Currency  *string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }

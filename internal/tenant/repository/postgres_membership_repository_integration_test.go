@@ -31,12 +31,12 @@ func TestPostgresMembershipRepositoryPersistsUniqueAndDisabledMemberships(t *tes
 	if err := db.PingContext(ctx); err != nil {
 		t.Skipf("database is unavailable: %v", err)
 	}
-	for _, query := range []string{"DROP TABLE IF EXISTS tenant_memberships", "DROP TABLE IF EXISTS tenants", "DROP TABLE IF EXISTS users"} {
+	for _, query := range []string{"DROP TABLE IF EXISTS services", "DROP TABLE IF EXISTS tenant_memberships", "DROP TABLE IF EXISTS tenants", "DROP TABLE IF EXISTS users"} {
 		if _, err := db.ExecContext(ctx, query); err != nil {
 			t.Fatalf("schema query failed: %v", err)
 		}
 	}
-	for _, migration := range []string{"000001_create_users.up.sql", "000003_create_tenants.up.sql", "000004_create_tenant_memberships.up.sql"} {
+	for _, migration := range []string{"000001_create_users.up.sql", "000003_create_tenants.up.sql", "000004_create_tenant_memberships.up.sql", "000010_create_services_and_tenant_currency.up.sql"} {
 		contents, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", migration))
 		if err != nil {
 			t.Fatalf("reading migration %s: %v", migration, err)

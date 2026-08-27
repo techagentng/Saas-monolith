@@ -50,8 +50,13 @@ type PublicTenant struct {
 	// PublicTenantIdentity's anonymous view.
 	OnboardingStatus model.OnboardingStatus `json:"onboarding_status"`
 	OnboardingStep   *string                `json:"onboarding_step"`
-	CreatedAt        time.Time              `json:"created_at"`
-	UpdatedAt        time.Time              `json:"updated_at"`
+	// Currency is null until the tenant declares one and is write-once
+	// thereafter (Scheduling S1). It is readable here but writable only through
+	// PUT /api/v1/tenants/{tenantID}/currency — UpdateTenantProfileRequest has
+	// no field for it, so this PATCH endpoint cannot change it.
+	Currency  *string   `json:"currency"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // toPublicTenant builds the response DTO from a domain tenant. A single
@@ -62,7 +67,7 @@ func toPublicTenant(tenant *model.Tenant) PublicTenant {
 		ID: tenant.ID, Name: tenant.Name, Slug: tenant.Slug, Status: tenant.Status,
 		Description: tenant.Description, ContactEmail: tenant.ContactEmail, ContactPhone: tenant.ContactPhone, Timezone: tenant.Timezone,
 		BusinessType: tenant.BusinessType, OnboardingStatus: tenant.OnboardingStatus, OnboardingStep: tenant.OnboardingStep,
-		CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
+		Currency: tenant.Currency, CreatedAt: tenant.CreatedAt, UpdatedAt: tenant.UpdatedAt,
 	}
 }
 

@@ -47,6 +47,9 @@ func TestRBACMigrationsCreateConstraintsAndSeedDefinitions(t *testing.T) {
 		}
 	}
 	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS tenants")
+	// services references tenants (Scheduling S1); dropped first via a defer
+	// registered later, since defers run last-in-first-out.
+	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS services")
 	defer db.ExecContext(ctx, "DROP TABLE IF EXISTS users")
 
 	rolesMigration, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", "000005_create_roles_permissions.up.sql"))
