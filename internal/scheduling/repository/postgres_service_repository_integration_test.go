@@ -35,12 +35,14 @@ var schedulingMigrations = []string{
 	"000009_add_business_type_and_onboarding_to_tenants.up.sql",
 	"000010_create_services_and_tenant_currency.up.sql",
 	"000011_seed_service_permissions.up.sql",
+	"000012_create_staff_profiles_and_capabilities.up.sql",
+	"000013_seed_staff_permissions.up.sql",
 }
 
 // schedulingTables is the drop order — children before parents, so foreign keys
 // never block the reset.
 var schedulingTables = []string{
-	"services", "user_roles", "role_permissions", "permissions", "roles",
+	"staff_services", "staff_profiles", "services", "user_roles", "role_permissions", "permissions", "roles",
 	"tenant_memberships", "sessions", "tenants", "users",
 }
 

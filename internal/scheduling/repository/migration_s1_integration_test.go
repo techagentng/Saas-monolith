@@ -29,29 +29,7 @@ var s1Grants = map[string][]string{
 
 func grantsForRole(t *testing.T, db *sql.DB, roleName string) []string {
 	t.Helper()
-	rows, err := db.QueryContext(context.Background(), `
-SELECT p.code
-FROM role_permissions rp
-JOIN roles r       ON r.id = rp.role_id
-JOIN permissions p ON p.id = rp.permission_id
-WHERE r.name = $1 AND p.code LIKE 'service.%'
-ORDER BY p.code`, roleName)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-	codes := []string{}
-	for rows.Next() {
-		var code string
-		if err := rows.Scan(&code); err != nil {
-			t.Fatal(err)
-		}
-		codes = append(codes, code)
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return codes
+	return scopedGrantsForRole(t, db, roleName, "service.%")
 }
 
 func TestMigrationCreatesTheServicesTableAndCurrencyColumn(t *testing.T) {
@@ -127,14 +105,18 @@ func TestMigrationSeedsExactlyTheFourServicePermissions(t *testing.T) {
 		t.Fatalf("service permissions = %v, want exactly %v", codes, s1Permissions)
 	}
 
-	// The pre-existing catalog must be untouched: 13 seeded by 000006, plus
-	// these 4.
-	var total int
-	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM permissions").Scan(&total); err != nil {
+	// The pre-existing catalog must be untouched. Counted as "everything that is
+	// not a scheduling permission" rather than as an absolute total, so this
+	// assertion stays about S1 instead of becoming a tripwire that every later
+	// feature migration has to bump.
+	var preExisting int
+	err = db.QueryRowContext(context.Background(),
+		"SELECT COUNT(*) FROM permissions WHERE code NOT LIKE 'service.%' AND code NOT LIKE 'staff.%'").Scan(&preExisting)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if total != 17 {
-		t.Fatalf("permission catalog has %d rows, want 17 (13 pre-existing + 4 from S1)", total)
+	if preExisting != 13 {
+		t.Fatalf("non-scheduling permissions = %d, want the original 13 untouched", preExisting)
 	}
 }
 
@@ -197,7 +179,7 @@ SELECT COUNT(*)
 FROM role_permissions rp
 JOIN roles r       ON r.id = rp.role_id
 JOIN permissions p ON p.id = rp.permission_id
-WHERE r.name = 'BUSINESS_OWNER' AND p.code NOT LIKE 'service.%'`).Scan(&ownerNonService)
+WHERE r.name = 'BUSINESS_OWNER' AND p.code NOT LIKE 'service.%' AND p.code NOT LIKE 'staff.%'`).Scan(&ownerNonService)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +193,7 @@ SELECT COUNT(*)
 FROM role_permissions rp
 JOIN roles r       ON r.id = rp.role_id
 JOIN permissions p ON p.id = rp.permission_id
-WHERE r.name = 'STAFF' AND p.code NOT LIKE 'service.%'`).Scan(&staffNonService)
+WHERE r.name = 'STAFF' AND p.code NOT LIKE 'service.%' AND p.code NOT LIKE 'staff.%'`).Scan(&staffNonService)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,9 +209,14 @@ func TestDownMigrationRemovesOnlyTheS1Additions(t *testing.T) {
 	db := openSchedulingTestDB(t)
 	ctx := context.Background()
 
-	// Applied newest-first, the order a real rollback uses: 000011 removes the
-	// permission catalog, then 000010 removes the schema.
+	// Applied newest-first, the order a real rollback uses. S3's migrations are
+	// included because staff_services holds a composite foreign key into
+	// services: rolling S1 back while S3 is still applied is not a legal
+	// database state, and pretending otherwise would test a rollback nobody can
+	// actually perform.
 	for _, migration := range []string{
+		"000013_seed_staff_permissions.down.sql",
+		"000012_create_staff_profiles_and_capabilities.down.sql",
 		"000011_seed_service_permissions.down.sql",
 		"000010_create_services_and_tenant_currency.down.sql",
 	} {
@@ -258,12 +245,22 @@ func TestDownMigrationRemovesOnlyTheS1Additions(t *testing.T) {
 		t.Fatal("the down migration left tenants.currency behind")
 	}
 
-	var servicePermissions int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM permissions WHERE code LIKE 'service.%'").Scan(&servicePermissions); err != nil {
+	var schedulingPermissions int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM permissions WHERE code LIKE 'service.%' OR code LIKE 'staff.%'").Scan(&schedulingPermissions); err != nil {
 		t.Fatal(err)
 	}
-	if servicePermissions != 0 {
-		t.Fatalf("the down migration left %d service permissions behind", servicePermissions)
+	if schedulingPermissions != 0 {
+		t.Fatalf("the down migrations left %d scheduling permissions behind", schedulingPermissions)
+	}
+
+	for _, table := range []string{"staff_services", "staff_profiles"} {
+		var exists bool
+		if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)", table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists {
+			t.Fatalf("the down migration left %s behind", table)
+		}
 	}
 
 	// No orphaned grant may survive pointing at a deleted permission.

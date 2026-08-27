@@ -71,8 +71,23 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// the tenant only to resolve its currency before a price is accepted, so it
 	// is handed the tenant repository through its own narrow TenantReader
 	// interface rather than the whole tenant service.
-	catalogService := schedulingservice.NewCatalogService(schedulingrepository.NewPostgresServiceRepository(db), tenants)
+	serviceRepository := schedulingrepository.NewPostgresServiceRepository(db)
+	catalogService := schedulingservice.NewCatalogService(serviceRepository, tenants)
 	serviceHandler := schedulinghandler.NewServiceHandler(catalogService)
+
+	// Scheduling S3: bookable staff and the services each of them performs. The
+	// module validates a profile's optional user link against tenant membership,
+	// so it is handed the membership repository through its own narrow
+	// MembershipReader interface. It owns the transaction for atomic capability
+	// replacement, hence the *sql.DB.
+	staffService := schedulingservice.NewStaffService(
+		db,
+		schedulingrepository.NewPostgresStaffRepository(db),
+		schedulingrepository.NewPostgresCapabilityRepository(db),
+		serviceRepository,
+		memberships,
+	)
+	staffHandler := schedulinghandler.NewStaffHandler(staffService)
 
 	roles := authzrepository.NewPostgresRoleRepository(db)
 	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
@@ -226,6 +241,73 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.archive"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				serviceHandler.Archive(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+
+	// Scheduling S3 staff roster and capability assignment (tenant-management
+	// only — a public technician list is S8 and is deliberately not registered
+	// here).
+	//
+	// Route authorization matrix:
+	//   POST   /api/v1/tenants/{tenantID}/staff                       TENANT  staff.create
+	//   GET    /api/v1/tenants/{tenantID}/staff                       TENANT  staff.read
+	//   GET    /api/v1/tenants/{tenantID}/staff/{staffID}             TENANT  staff.read
+	//   PATCH  /api/v1/tenants/{tenantID}/staff/{staffID}             TENANT  staff.update
+	//   POST   /api/v1/tenants/{tenantID}/staff/{staffID}/archive     TENANT  staff.archive
+	//   GET    /api/v1/tenants/{tenantID}/staff/{staffID}/services    TENANT  staff.read
+	//   PUT    /api/v1/tenants/{tenantID}/staff/{staffID}/services    TENANT  staff.update
+	//
+	// Capability assignment carries staff.update, not service.update: it changes
+	// what a staff member can do, never the service definition itself. There is
+	// deliberately no separate staff.assign permission.
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	api.Handle("POST /api/v1/tenants/{tenantID}/staff", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.create"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.Create(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/staff", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.List(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/staff/{staffID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.Get(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
+			}),
+		),
+	)))
+	api.Handle("PATCH /api/v1/tenants/{tenantID}/staff/{staffID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.Update(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
+			}),
+		),
+	)))
+	api.Handle("POST /api/v1/tenants/{tenantID}/staff/{staffID}/archive", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.archive"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.Archive(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/staff/{staffID}/services", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.ListCapabilities(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
+			}),
+		),
+	)))
+	api.Handle("PUT /api/v1/tenants/{tenantID}/staff/{staffID}/services", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.ReplaceCapabilities(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
 			}),
 		),
 	)))
