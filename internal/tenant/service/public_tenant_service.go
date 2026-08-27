@@ -14,11 +14,20 @@ import (
 // membership/role data, and the private business contact details captured in
 // Feature 4. Anything added to this struct becomes readable by anonymous
 // callers, so additions are a security decision rather than a convenience one.
+//
+// BusinessType (Vertical Onboarding F3) is the one deliberate addition beyond
+// Feature 5's original four fields — needed so a future public vertical
+// router can pick the right customer experience for this tenant. It is
+// nullable only for a tenant created before Feature 1 existed (see
+// model.Tenant's own doc comment); F3 does not invent a value for it.
+// OnboardingStatus/OnboardingStep are workflow internals, not identity, and
+// are deliberately never added here.
 type PublicTenantIdentity struct {
-	Slug        string
-	Name        string
-	Description *string
-	Timezone    *string
+	Slug         string
+	Name         string
+	Description  *string
+	Timezone     *string
+	BusinessType *model.BusinessType
 }
 
 // PublicTenantService resolves the public identity of a tenant from its slug.
@@ -54,18 +63,29 @@ func (s *publicTenantService) GetBySlug(ctx context.Context, slug string) (*Publ
 		return nil, err
 	}
 
-	// Public visibility is an ACTIVE-only policy. A disabled tenant is
-	// indistinguishable from an unregistered slug, so lifecycle state is never
-	// disclosed publicly. Lifecycle transitions themselves remain Feature 8.
-	if tenant.Status != model.StatusActive {
+	// Public visibility (Vertical Onboarding F3): ACTIVE AND COMPLETED,
+	// both required. Feature 5's original ACTIVE-only check is necessary but
+	// no longer sufficient on its own — a freshly created tenant is ACTIVE
+	// (not disabled/revoked) yet IN_PROGRESS (business setup unfinished),
+	// and must be just as unreachable publicly as a disabled or nonexistent
+	// one, or the completion gate Feature 2 enforces becomes pointless. Every
+	// failing combination — ACTIVE+IN_PROGRESS, DISABLED+COMPLETED,
+	// DISABLED+IN_PROGRESS — collapses to the same TENANT_NOT_FOUND,
+	// preserving Feature 5's "disabled and nonexistent are indistinguishable"
+	// privacy property for "still onboarding and nonexistent" too. Lifecycle
+	// transitions themselves remain Feature 8; this does not add a new
+	// lifecycle state, it adds a second, independent condition alongside the
+	// existing one.
+	if tenant.Status != model.StatusActive || tenant.OnboardingStatus != model.OnboardingStatusCompleted {
 		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", nil)
 	}
 
 	return &PublicTenantIdentity{
-		Slug:        tenant.Slug,
-		Name:        tenant.Name,
-		Description: tenant.Description,
-		Timezone:    tenant.Timezone,
+		Slug:         tenant.Slug,
+		Name:         tenant.Name,
+		Description:  tenant.Description,
+		Timezone:     tenant.Timezone,
+		BusinessType: tenant.BusinessType,
 	}, nil
 }
 

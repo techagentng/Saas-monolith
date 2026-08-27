@@ -59,12 +59,12 @@ func TestPublicTenantRouteResponseOmitsPrivateFields(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
 		t.Fatalf("invalid JSON: %v", err)
 	}
-	for _, forbidden := range []string{"id", "tenant_id", "status", "created_at", "updated_at", "contact_email", "contact_phone"} {
+	for _, forbidden := range []string{"id", "tenant_id", "status", "created_at", "updated_at", "contact_email", "contact_phone", "onboarding_status", "onboarding_step"} {
 		if _, present := body[forbidden]; present {
 			t.Fatalf("public response exposed %q: %s", forbidden, recorder.Body.String())
 		}
 	}
-	want := map[string]bool{"slug": true, "name": true, "description": true, "timezone": true}
+	want := map[string]bool{"slug": true, "name": true, "description": true, "timezone": true, "business_type": true}
 	for key := range body {
 		if !want[key] {
 			t.Fatalf("public response exposed unexpected key %q", key)
@@ -115,6 +115,78 @@ func TestPublicTenantRouteHidesDisabledTenantIdentically(t *testing.T) {
 	}
 	if containsAny(disabledRecorder.Body.String(), "Acme Salon", "acme-salon") {
 		t.Fatalf("disabled tenant leaked data: %s", disabledRecorder.Body.String())
+	}
+}
+
+// --- Vertical Onboarding F3: IN_PROGRESS tenants are hidden identically -----
+
+// An IN_PROGRESS tenant must be indistinguishable from a nonexistent slug —
+// same status code, same body shape — exactly like the existing disabled-vs-
+// missing proof above, for the new condition F3 adds.
+func TestPublicTenantRouteHidesInProgressTenantIdentically(t *testing.T) {
+	inProgress := activePublicTenant()
+	inProgress.OnboardingStatus = tenantmodel.OnboardingStatusInProgress
+	inProgressHandler, _ := buildPublicTenantRoute(inProgress)
+	inProgressRecorder := httptest.NewRecorder()
+	inProgressHandler.ServeHTTP(inProgressRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/public/tenants/acme-salon", nil))
+
+	missingHandler, _ := buildPublicTenantRoute(activePublicTenant())
+	missingRecorder := httptest.NewRecorder()
+	missingHandler.ServeHTTP(missingRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/public/tenants/no-such-tenant", nil))
+
+	if inProgressRecorder.Code != http.StatusNotFound {
+		t.Fatalf("in-progress tenant status = %d, want 404", inProgressRecorder.Code)
+	}
+	if inProgressRecorder.Code != missingRecorder.Code || inProgressRecorder.Body.String() != missingRecorder.Body.String() {
+		t.Fatalf("in-progress response %q differs from missing response %q; onboarding state is publicly detectable",
+			inProgressRecorder.Body.String(), missingRecorder.Body.String())
+	}
+	if containsAny(inProgressRecorder.Body.String(), "Acme Salon", "acme-salon", "NAIL_TECHNICIAN") {
+		t.Fatalf("in-progress tenant leaked data: %s", inProgressRecorder.Body.String())
+	}
+}
+
+// A DISABLED+IN_PROGRESS tenant (the fourth matrix combination) is hidden
+// the same way, and must match the same 404 shape too.
+func TestPublicTenantRouteHidesDisabledInProgressTenantIdentically(t *testing.T) {
+	disabledInProgress := activePublicTenant()
+	disabledInProgress.Status = tenantmodel.StatusDisabled
+	disabledInProgress.OnboardingStatus = tenantmodel.OnboardingStatusInProgress
+	handler, _ := buildPublicTenantRoute(disabledInProgress)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/public/tenants/acme-salon", nil))
+
+	missingHandler, _ := buildPublicTenantRoute(activePublicTenant())
+	missingRecorder := httptest.NewRecorder()
+	missingHandler.ServeHTTP(missingRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/public/tenants/no-such-tenant", nil))
+
+	if recorder.Code != http.StatusNotFound || recorder.Body.String() != missingRecorder.Body.String() {
+		t.Fatalf("disabled+in-progress response (%d %q) differs from missing response (%d %q)",
+			recorder.Code, recorder.Body.String(), missingRecorder.Code, missingRecorder.Body.String())
+	}
+}
+
+// A legacy tenant (business_type nil, onboarding_status COMPLETED, exactly
+// what migration 000009 backfilled) must remain publicly reachable, with a
+// null business_type rather than an invented one or a crash.
+func TestPublicTenantRouteServesLegacyTenantWithNilBusinessType(t *testing.T) {
+	legacy := &tenantmodel.Tenant{
+		ID: "550e8400-e29b-41d4-a716-446655441199", Name: "Legacy Salon", Slug: "legacy-salon",
+		Status: tenantmodel.StatusActive, OnboardingStatus: tenantmodel.OnboardingStatusCompleted,
+	}
+	handler, _ := buildPublicTenantRoute(legacy)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/public/tenants/legacy-salon", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200 for a legacy COMPLETED tenant", recorder.Code, recorder.Body.String())
+	}
+	var identity tenanthandler.PublicTenantIdentity
+	if err := json.Unmarshal(recorder.Body.Bytes(), &identity); err != nil {
+		t.Fatalf("invalid JSON: %v", err)
+	}
+	if identity.BusinessType != nil {
+		t.Fatalf("BusinessType = %v, want nil for a legacy tenant", identity.BusinessType)
 	}
 }
 
@@ -198,11 +270,16 @@ func activePublicTenant() *tenantmodel.Tenant {
 	timezone := "Africa/Lagos"
 	email := "private@acme.test"
 	phone := "+2348012345678"
+	businessType := tenantmodel.BusinessTypeNailTechnician
 	now := time.Now().UTC()
 	return &tenantmodel.Tenant{
 		ID: publicRouteTenantID, Name: "Acme Salon", Slug: "acme-salon",
 		Status: tenantmodel.StatusActive, Description: &description, Timezone: &timezone,
 		ContactEmail: &email, ContactPhone: &phone, CreatedAt: now, UpdatedAt: now,
+		// Vertical Onboarding F3: visibility now also requires COMPLETED —
+		// this fixture represents a fully launched tenant, matching what
+		// "active" meant on its own before F3 existed.
+		BusinessType: &businessType, OnboardingStatus: tenantmodel.OnboardingStatusCompleted,
 	}
 }
 

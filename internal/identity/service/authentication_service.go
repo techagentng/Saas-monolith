@@ -75,7 +75,16 @@ func (s *authenticationService) Refresh(ctx context.Context, refreshToken string
 	if err != nil {
 		return nil, fmt.Errorf("issuing access token: %w", err)
 	}
-	return &AuthenticationResult{AccessToken: access, RefreshToken: raw, ExpiresIn: int64(s.tokens.config.AccessLifetime.Seconds())}, nil
+	// The user is resolved and returned so a browser that refreshed (losing
+	// all in-memory state) can rebuild its identity from this one call,
+	// rather than needing a separate "who am I" endpoint. A session whose
+	// user has since been removed or deactivated must not refresh: the
+	// session is treated as no longer valid rather than half-restored.
+	user, err := s.users.FindByID(ctx, session.UserID)
+	if err != nil || user == nil || user.Status != model.StatusActive {
+		return nil, apperrors.New(apperrors.CodeSessionRevoked, "session revoked", err)
+	}
+	return &AuthenticationResult{User: user, AccessToken: access, RefreshToken: raw, ExpiresIn: int64(s.tokens.config.AccessLifetime.Seconds())}, nil
 }
 
 func (s *authenticationService) Logout(ctx context.Context, sessionID string) error {

@@ -39,10 +39,12 @@ func activeSlugTenant() *model.Tenant {
 	timezone := "Africa/Lagos"
 	email := "private@acme.test"
 	phone := "+2348012345678"
+	businessType := model.BusinessTypeNailTechnician
 	return &model.Tenant{
 		ID: "550e8400-e29b-41d4-a716-446655441001", Name: "Acme Salon", Slug: "acme-salon",
 		Status: model.StatusActive, Description: &description, Timezone: &timezone,
 		ContactEmail: &email, ContactPhone: &phone,
+		BusinessType: &businessType, OnboardingStatus: model.OnboardingStatusCompleted,
 	}
 }
 
@@ -77,7 +79,9 @@ func TestPublicTenantServiceResolvesActiveTenantBySlug(t *testing.T) {
 }
 
 // A DISABLED tenant is hidden from public callers and is indistinguishable
-// from a slug that was never registered.
+// from a slug that was never registered. activeSlugTenant is COMPLETED, so
+// this proves DISABLED+COMPLETED specifically; see the visibility-matrix
+// tests below for the other three combinations.
 func TestPublicTenantServiceHidesDisabledTenant(t *testing.T) {
 	tenant := activeSlugTenant()
 	tenant.Status = model.StatusDisabled
@@ -85,6 +89,89 @@ func TestPublicTenantServiceHidesDisabledTenant(t *testing.T) {
 
 	_, err := NewPublicTenantService(repo).GetBySlug(context.Background(), "acme-salon")
 	assertPublicCode(t, err, apperrors.CodeTenantNotFound)
+}
+
+// --- Vertical Onboarding F3: publicly visible iff ACTIVE AND COMPLETED -----
+
+// The full visibility matrix. Only ACTIVE+COMPLETED resolves; every other
+// combination collapses to the same TENANT_NOT_FOUND as a nonexistent slug —
+// F3 does not add a new lifecycle state, it adds a second required condition
+// alongside Feature 5's existing ACTIVE check.
+func TestPublicTenantServiceVisibilityMatrix(t *testing.T) {
+	cases := []struct {
+		name             string
+		status           model.Status
+		onboardingStatus model.OnboardingStatus
+		wantVisible      bool
+	}{
+		{"active and completed", model.StatusActive, model.OnboardingStatusCompleted, true},
+		{"active and in progress", model.StatusActive, model.OnboardingStatusInProgress, false},
+		{"disabled and completed", model.StatusDisabled, model.OnboardingStatusCompleted, false},
+		{"disabled and in progress", model.StatusDisabled, model.OnboardingStatusInProgress, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tenant := activeSlugTenant()
+			tenant.Status = tc.status
+			tenant.OnboardingStatus = tc.onboardingStatus
+			repo := &slugLookupRepository{tenant: tenant}
+
+			identity, err := NewPublicTenantService(repo).GetBySlug(context.Background(), "acme-salon")
+			if tc.wantVisible {
+				if err != nil {
+					t.Fatalf("GetBySlug() error = %v, want visible", err)
+				}
+				if identity == nil {
+					t.Fatal("GetBySlug() returned nil identity for a visible tenant")
+				}
+				return
+			}
+			assertPublicCode(t, err, apperrors.CodeTenantNotFound)
+		})
+	}
+}
+
+// An IN_PROGRESS tenant specifically, since this is the case F3 exists to
+// close (a freshly created tenant was previously still ACTIVE and thus
+// publicly resolvable before onboarding completed).
+func TestPublicTenantServiceHidesInProgressTenant(t *testing.T) {
+	tenant := activeSlugTenant()
+	tenant.OnboardingStatus = model.OnboardingStatusInProgress
+	repo := &slugLookupRepository{tenant: tenant}
+
+	_, err := NewPublicTenantService(repo).GetBySlug(context.Background(), "acme-salon")
+	assertPublicCode(t, err, apperrors.CodeTenantNotFound)
+}
+
+func TestPublicTenantIdentityIncludesBusinessType(t *testing.T) {
+	repo := &slugLookupRepository{tenant: activeSlugTenant()}
+	identity, err := NewPublicTenantService(repo).GetBySlug(context.Background(), "acme-salon")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.BusinessType == nil || *identity.BusinessType != model.BusinessTypeNailTechnician {
+		t.Fatalf("BusinessType = %v, want NAIL_TECHNICIAN", identity.BusinessType)
+	}
+}
+
+// A legacy tenant (pre-Feature-1: business_type NULL, onboarding_status
+// COMPLETED via the migration default) must remain publicly resolvable —
+// F3 must not force it through onboarding, and must not invent a business
+// type for it. null is the approved safe representation.
+func TestPublicTenantIdentityForLegacyTenantHasNilBusinessType(t *testing.T) {
+	tenant := &model.Tenant{
+		ID: "550e8400-e29b-41d4-a716-446655441002", Name: "Legacy Salon", Slug: "legacy-salon",
+		Status: model.StatusActive, OnboardingStatus: model.OnboardingStatusCompleted,
+	}
+	repo := &slugLookupRepository{tenant: tenant}
+
+	identity, err := NewPublicTenantService(repo).GetBySlug(context.Background(), "legacy-salon")
+	if err != nil {
+		t.Fatalf("GetBySlug() error = %v, want a legacy COMPLETED tenant to remain visible", err)
+	}
+	if identity.BusinessType != nil {
+		t.Fatalf("BusinessType = %v, want nil for a legacy tenant, not an invented value", identity.BusinessType)
+	}
 }
 
 func TestPublicTenantServiceReturnsNotFoundForUnknownSlug(t *testing.T) {
@@ -130,7 +217,9 @@ func TestPublicTenantIdentityExcludesPrivateFields(t *testing.T) {
 	// PublicTenantIdentity is the whole public contract. Enumerating its fields
 	// makes any future addition — an ID, a contact detail — fail here loudly
 	// rather than silently widening what unauthenticated callers can read.
-	want := map[string]bool{"Slug": true, "Name": true, "Description": true, "Timezone": true}
+	// BusinessType is the one deliberate F3 addition; onboarding_status and
+	// onboarding_step must never appear here (see the dedicated test below).
+	want := map[string]bool{"Slug": true, "Name": true, "Description": true, "Timezone": true, "BusinessType": true}
 	structType := reflect.TypeOf(identity).Elem()
 	if structType.NumField() != len(want) {
 		t.Fatalf("PublicTenantIdentity has %d fields, want %d", structType.NumField(), len(want))

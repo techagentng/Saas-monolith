@@ -227,3 +227,36 @@ func (r *PostgresTenantRepository) UpdateProfile(ctx context.Context, tenantID s
 
 	return tenant, nil
 }
+
+// UpdateOnboardingStep persists only onboarding_step (Vertical Onboarding
+// F2). Its SET clause has no other column to write, which is what
+// structurally guarantees it can never touch onboarding_status,
+// business_type, or anything else — the same "absence is the enforcement"
+// pattern UpdateProfile already relies on for business_type immutability.
+func (r *PostgresTenantRepository) UpdateOnboardingStep(ctx context.Context, tenantID string, step string) (*model.Tenant, error) {
+	row := r.db.QueryRowContext(ctx, "UPDATE tenants SET onboarding_step = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING "+tenantColumns, step, tenantID)
+	tenant, err := scanTenant(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("updating onboarding step: %w", err)
+	}
+	return tenant, nil
+}
+
+// CompleteOnboarding transitions onboarding_status to COMPLETED
+// unconditionally. It has no idea whether completion prerequisites were
+// checked or whether the tenant was already COMPLETED — OnboardingService.Complete
+// owns both of those decisions and only calls this once they're settled.
+func (r *PostgresTenantRepository) CompleteOnboarding(ctx context.Context, tenantID string) (*model.Tenant, error) {
+	row := r.db.QueryRowContext(ctx, "UPDATE tenants SET onboarding_status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING "+tenantColumns, string(model.OnboardingStatusCompleted), tenantID)
+	tenant, err := scanTenant(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", err)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("completing onboarding: %w", err)
+	}
+	return tenant, nil
+}

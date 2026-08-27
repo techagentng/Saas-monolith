@@ -26,6 +26,17 @@ type Config struct {
 	PrivateKey       ed25519.PrivateKey
 	PublicKey        ed25519.PublicKey
 	AllowedOrigins   []string
+	// CookieSecure marks the refresh cookie Secure (HTTPS-only). Defaults to
+	// true in production and false in development, where the API is served
+	// over plain HTTP — a Secure cookie would simply never be stored there.
+	CookieSecure bool
+	// CookieSameSite is the refresh cookie's SameSite policy. "Lax" is the
+	// default and is correct whenever the browser app and this API share a
+	// registrable domain (including localhost:3000 -> localhost:8090, where
+	// the differing port does not make the request cross-site). A genuinely
+	// cross-site deployment must set "None", which browsers only honor
+	// together with Secure.
+	CookieSameSite string
 }
 
 func Load() (Config, error) { return load(os.LookupEnv) }
@@ -57,6 +68,22 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, err
 	}
 	c.AllowedOrigins = originList(lookup, "ALLOWED_ORIGINS")
+	isProduction := c.Env == "production" || c.Env == "prod"
+	if c.CookieSecure, err = boolean(lookup, "COOKIE_SECURE", isProduction); err != nil {
+		return Config{}, err
+	}
+	c.CookieSameSite = get(lookup, "COOKIE_SAMESITE", "Lax")
+	switch c.CookieSameSite {
+	case "Lax", "Strict", "None":
+	default:
+		return Config{}, fmt.Errorf("COOKIE_SAMESITE must be Lax, Strict, or None")
+	}
+	// Browsers reject SameSite=None without Secure, which would silently drop
+	// the refresh cookie and log every user out on reload. Fail at startup
+	// instead of shipping a session that cannot persist.
+	if c.CookieSameSite == "None" && !c.CookieSecure {
+		return Config{}, fmt.Errorf("COOKIE_SAMESITE=None requires COOKIE_SECURE=true")
+	}
 	privateValue := get(lookup, "ED25519_PRIVATE_KEY", "")
 	publicValue := get(lookup, "ED25519_PUBLIC_KEY", "")
 	privateSet, publicSet := privateValue != "", publicValue != ""
@@ -97,6 +124,18 @@ func requiredInteger(lookup func(string) (string, bool), key string) (int, error
 		return 0, fmt.Errorf("%s is required", key)
 	}
 	return integer(lookup, key, 0)
+}
+
+func boolean(lookup func(string) (string, bool), key string, fallback bool) (bool, error) {
+	raw := get(lookup, key, "")
+	if raw == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return parsed, nil
 }
 
 func duration(lookup func(string) (string, bool), key string, fallback time.Duration) (time.Duration, error) {

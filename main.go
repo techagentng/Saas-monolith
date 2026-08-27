@@ -11,6 +11,15 @@ import (
 	"syscall"
 	"time"
 
+	// Embeds the IANA timezone database in the binary as a fallback for when
+	// the host has no system zoneinfo — common in minimal containers and on
+	// Windows. Tenant profile updates and onboarding completion both reject a
+	// timezone that time.LoadLocation cannot resolve, so without this a
+	// deployment could refuse every valid timezone and make onboarding
+	// impossible to finish. Costs ~450KB and is only consulted when the
+	// system database is missing.
+	_ "time/tzdata"
+
 	"github.com/joho/godotenv"
 	"github.com/techagentng/saas-monolith/internal/app"
 	"github.com/techagentng/saas-monolith/internal/config"

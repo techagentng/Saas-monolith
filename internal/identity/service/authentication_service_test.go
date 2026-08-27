@@ -58,13 +58,19 @@ func TestLoginDisabledUserIsGenericAndCreatesNoSession(t *testing.T) {
 }
 
 func TestRefreshRotatesCredentialAndLogoutRevokesSession(t *testing.T) {
-	session := &model.Session{ID: "550e8400-e29b-41d4-a716-446655440001", UserID: "550e8400-e29b-41d4-a716-446655440000", ExpiresAt: time.Now().Add(time.Hour)}
+	user := &model.User{ID: "550e8400-e29b-41d4-a716-446655440000", Email: "user@example.com", Status: model.StatusActive}
+	session := &model.Session{ID: "550e8400-e29b-41d4-a716-446655440001", UserID: user.ID, ExpiresAt: time.Now().Add(time.Hour)}
 	sessions := &fakeSessionRepository{session: session}
-	service := NewAuthenticationService(nil, nil, sessions, NewTokenManager(testTokenConfig()))
+	service := NewAuthenticationService(&fakeUserRepository{user: user}, nil, sessions, NewTokenManager(testTokenConfig()))
 
 	result, err := service.Refresh(context.Background(), "refresh-token")
 	if err != nil || result.AccessToken == "" || result.RefreshToken == "" {
 		t.Fatalf("Refresh() = %#v, %v", result, err)
+	}
+	// The browser lost all in-memory state on reload; refresh is the only
+	// call that can tell it who it is signed in as.
+	if result.User == nil || result.User.ID != user.ID {
+		t.Fatalf("Refresh() user = %#v, want the session's user for state restoration", result.User)
 	}
 	if sessions.rotatedHash == "" || sessions.rotatedHash == session.RefreshTokenHash {
 		t.Fatal("refresh credential was not rotated")
@@ -74,6 +80,23 @@ func TestRefreshRotatesCredentialAndLogoutRevokesSession(t *testing.T) {
 	}
 	if !sessions.revoked {
 		t.Fatal("session was not revoked")
+	}
+}
+
+// A session must not outlive the account behind it: a disabled user holding a
+// still-unexpired refresh cookie must not be able to mint fresh access tokens.
+func TestRefreshRejectsSessionWhoseUserIsNoLongerActive(t *testing.T) {
+	for name, user := range map[string]*model.User{
+		"disabled user": {ID: "550e8400-e29b-41d4-a716-446655440000", Email: "user@example.com", Status: model.StatusDisabled},
+		"missing user":  nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			session := &model.Session{ID: "550e8400-e29b-41d4-a716-446655440001", UserID: "550e8400-e29b-41d4-a716-446655440000", ExpiresAt: time.Now().Add(time.Hour)}
+			service := NewAuthenticationService(&fakeUserRepository{user: user}, nil, &fakeSessionRepository{session: session}, NewTokenManager(testTokenConfig()))
+
+			_, err := service.Refresh(context.Background(), "refresh-token")
+			assertAuthCode(t, err, apperrors.CodeSessionRevoked)
+		})
 	}
 }
 

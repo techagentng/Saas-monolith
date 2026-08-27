@@ -35,12 +35,21 @@ type CreateTenantInput struct {
 
 // UpdateTenantProfileRequest carries profile update fields from the transport layer.
 // Only non-nil fields will be updated; omitted fields remain unchanged.
+//
+// The json tags are required, not cosmetic: without them encoding/json falls
+// back to matching the Go field names, so "contact_email"/"contact_phone" —
+// the exact names PublicTenant emits on read — bound to nothing, and a caller
+// patching only those fields got VALIDATION_FAILED ("no fields to update")
+// while the undocumented "ContactEmail" spelling worked. The tags make this
+// endpoint writable in the same shape it is readable. Adding a field here
+// makes it client-writable, so the set stays limited to profile data:
+// business_type, slug, status, and ownership remain absent by design.
 type UpdateTenantProfileRequest struct {
-	Name         *string
-	Description  *string
-	ContactEmail *string
-	ContactPhone *string
-	Timezone     *string
+	Name         *string `json:"name"`
+	Description  *string `json:"description"`
+	ContactEmail *string `json:"contact_email"`
+	ContactPhone *string `json:"contact_phone"`
+	Timezone     *string `json:"timezone"`
 }
 
 type TenantService interface {

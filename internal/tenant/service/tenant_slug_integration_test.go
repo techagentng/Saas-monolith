@@ -82,8 +82,12 @@ func TestCreateTenantWithReservedSlugCreatesNothing(t *testing.T) {
 	assertCreationLeftNothing(t, db, ctx, userID)
 }
 
-// A valid slug still provisions the full Feature 2 unit atomically, and the
-// resulting tenant is immediately resolvable through the Feature 5 lookup.
+// A valid slug still provisions the full Feature 2 unit atomically. The
+// public-resolvability assertion at the end is intentionally inverted from
+// this test's pre-F3 form: since Vertical Onboarding F3, a freshly created
+// tenant is IN_PROGRESS and therefore publicly unreachable until onboarding
+// completes — see onboarding_public_visibility_integration_test.go for the
+// full create -> save -> complete -> publicly visible flow.
 func TestCreateTenantWithValidSlugRemainsAtomicAndPubliclyResolvable(t *testing.T) {
 	db := openTenantServiceTestDB(t)
 	ctx := context.Background()
@@ -115,12 +119,11 @@ func TestCreateTenantWithValidSlugRemainsAtomicAndPubliclyResolvable(t *testing.
 		t.Fatalf("assigned role = %q, want BUSINESS_OWNER", roleName)
 	}
 
-	identity, err := NewPublicTenantService(tenants).GetBySlug(ctx, "acme-beauty-studio")
-	if err != nil {
-		t.Fatalf("public lookup after creation error = %v", err)
-	}
-	if identity.Name != "Acme Beauty Studio" || identity.Slug != "acme-beauty-studio" {
-		t.Fatalf("public identity = %#v", identity)
+	// Vertical Onboarding F3: a freshly created tenant is IN_PROGRESS, so it
+	// must NOT be publicly resolvable yet — the corrected assertion, inverted
+	// from this test's pre-F3 expectation (see the function comment above).
+	if _, err := NewPublicTenantService(tenants).GetBySlug(ctx, "acme-beauty-studio"); err == nil {
+		t.Fatal("public lookup succeeded immediately after creation, want TENANT_NOT_FOUND (tenant is IN_PROGRESS)")
 	}
 }
 

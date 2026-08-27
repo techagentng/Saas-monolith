@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/techagentng/saas-monolith/internal/tenant/model"
 	"github.com/techagentng/saas-monolith/internal/tenant/service"
 )
 
@@ -26,11 +27,18 @@ func NewPublicTenantHandler(publicService service.PublicTenantService) *PublicTe
 // none of the private business contact details from Feature 4. Optional fields
 // keep a stable shape and serialize as null when unset, matching the rest of
 // the project's public DTOs.
+//
+// BusinessType (Vertical Onboarding F3) is the one deliberate addition beyond
+// Feature 5's original four fields, so a future public vertical router can
+// pick the right customer experience. onboarding_status/onboarding_step are
+// workflow internals and are deliberately never added here — F3's public
+// addition is business_type, not onboarding progress.
 type PublicTenantIdentity struct {
-	Slug        string  `json:"slug"`
-	Name        string  `json:"name"`
-	Description *string `json:"description"`
-	Timezone    *string `json:"timezone"`
+	Slug         string              `json:"slug"`
+	Name         string              `json:"name"`
+	Description  *string             `json:"description"`
+	Timezone     *string             `json:"timezone"`
+	BusinessType *model.BusinessType `json:"business_type"`
 }
 
 // GetBySlug resolves a tenant's public identity from its slug. The slug comes
@@ -45,9 +53,10 @@ func (h *PublicTenantHandler) GetBySlug(writer http.ResponseWriter, request *htt
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(writer).Encode(PublicTenantIdentity{
-		Slug:        identity.Slug,
-		Name:        identity.Name,
-		Description: identity.Description,
-		Timezone:    identity.Timezone,
+		Slug:         identity.Slug,
+		Name:         identity.Name,
+		Description:  identity.Description,
+		Timezone:     identity.Timezone,
+		BusinessType: identity.BusinessType,
 	})
 }

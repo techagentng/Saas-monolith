@@ -41,7 +41,15 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	userService := identityservice.NewUserService(users, identityservice.NewBcryptHasher())
 	tokens := identityservice.NewTokenManager(identityservice.TokenConfig{AccessLifetime: cfg.AccessLifetime, SessionLifetime: cfg.SessionLifetime, PrivateKey: cfg.PrivateKey, PublicKey: cfg.PublicKey})
 	authenticationService := identityservice.NewAuthenticationService(users, identityservice.NewBcryptHasher(), sessions, tokens)
-	authenticationHandler := identityhandler.NewAuthenticationHandler(authenticationService)
+	// The refresh cookie lives as long as the session it points at — a
+	// shorter Max-Age would sign the browser out while its session is still
+	// valid server-side, which is the exact defect this replaces.
+	refreshCookie := identityhandler.RefreshCookieConfig{
+		Secure:   cfg.CookieSecure,
+		SameSite: identityhandler.ParseSameSite(cfg.CookieSameSite),
+		MaxAge:   cfg.SessionLifetime,
+	}
+	authenticationHandler := identityhandler.NewAuthenticationHandler(authenticationService, refreshCookie)
 	userHandler := identityhandler.NewUserHandler(userService)
 	membershipService := tenantservice.NewMembershipService(users, tenants, memberships)
 	contextService := tenantservice.NewTenantContextService(tenants, memberships)
@@ -51,6 +59,8 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	tenantHandler := tenanthandler.NewTenantHandler(tenantCreationService, tenantRetrievalService)
 	publicTenantService := tenantservice.NewPublicTenantService(tenants)
 	publicTenantHandler := tenanthandler.NewPublicTenantHandler(publicTenantService)
+	onboardingService := tenantservice.NewOnboardingService(tenants)
+	onboardingHandler := tenanthandler.NewOnboardingHandler(onboardingService)
 
 	roles := authzrepository.NewPostgresRoleRepository(db)
 	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
@@ -118,6 +128,31 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "tenant.update"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				tenantHandler.UpdateProfile(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+
+	// Onboarding progress (Vertical Onboarding F2): flexible-order save of the
+	// caller's current onboarding step. No sequential enforcement, but tenant
+	// access and tenant.update are required — the same chain Feature 4's
+	// profile PATCH already uses, reused unchanged.
+	// Ordering: Authentication -> Tenant Context -> Authorization (tenant.update) -> Handler
+	api.Handle("PATCH /api/v1/tenants/{tenantID}/onboarding", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "tenant.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				onboardingHandler.SaveProgress(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+
+	// Onboarding completion (Vertical Onboarding F2): a validated, one-way
+	// transition to COMPLETED — see OnboardingService.Complete and
+	// validateOnboardingCompletionPrerequisites. Same authorization chain as
+	// the save-progress route above; this is deliberately not a lesser check.
+	api.Handle("POST /api/v1/tenants/{tenantID}/onboarding/complete", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "tenant.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				onboardingHandler.Complete(writer, request, request.PathValue("tenantID"))
 			}),
 		),
 	)))

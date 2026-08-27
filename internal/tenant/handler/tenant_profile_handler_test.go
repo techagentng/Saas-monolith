@@ -191,3 +191,54 @@ func TestUpdateProfileHandlerSerializesUnsetProfileFieldsAsNull(t *testing.T) {
 		}
 	}
 }
+
+// Regression (Vertical Onboarding F6): the request DTO must bind the same
+// snake_case field names the response emits. UpdateTenantProfileRequest
+// originally carried no json tags, so encoding/json fell back to matching Go
+// field names — "contact_email"/"contact_phone" silently bound to nothing and
+// a caller patching only those fields got VALIDATION_FAILED ("no fields to
+// update") while "ContactEmail" worked. That made the endpoint unwritable in
+// the shape it is readable, which the onboarding contact step is the first
+// feature to actually exercise.
+func TestUpdateProfileHandlerBindsSnakeCaseProfileFields(t *testing.T) {
+	fake := &tenantServiceFake{updateTenant: &model.Tenant{ID: profileRouteTenantID, Name: "Acme", Slug: "acme"}}
+	handler := NewTenantHandler(fake, &fakeRetrievalService{})
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateProfile(
+		recorder,
+		profilePatchRequest(`{"contact_email":"hi@acme.test","contact_phone":"+2348012345678"}`),
+		profileRouteTenantID,
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", recorder.Code, recorder.Body.String())
+	}
+	if fake.updateInput.ContactEmail == nil || *fake.updateInput.ContactEmail != "hi@acme.test" {
+		t.Fatalf("contact_email did not bind: %#v", fake.updateInput.ContactEmail)
+	}
+	if fake.updateInput.ContactPhone == nil || *fake.updateInput.ContactPhone != "+2348012345678" {
+		t.Fatalf("contact_phone did not bind: %#v", fake.updateInput.ContactPhone)
+	}
+}
+
+// Every writable profile field must round-trip under its documented name.
+func TestUpdateProfileHandlerBindsAllDocumentedFieldNames(t *testing.T) {
+	fake := &tenantServiceFake{updateTenant: &model.Tenant{ID: profileRouteTenantID, Name: "Acme", Slug: "acme"}}
+	handler := NewTenantHandler(fake, &fakeRetrievalService{})
+	recorder := httptest.NewRecorder()
+
+	handler.UpdateProfile(
+		recorder,
+		profilePatchRequest(`{"name":"Acme","description":"Nice","contact_email":"hi@acme.test","contact_phone":"123","timezone":"Africa/Lagos"}`),
+		profileRouteTenantID,
+	)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body = %s", recorder.Code, recorder.Body.String())
+	}
+	input := fake.updateInput
+	if input.Name == nil || input.Description == nil || input.ContactEmail == nil || input.ContactPhone == nil || input.Timezone == nil {
+		t.Fatalf("not every documented field bound: %#v", input)
+	}
+}
