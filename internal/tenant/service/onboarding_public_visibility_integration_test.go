@@ -57,6 +57,14 @@ func TestOnboardingCompletionMakesTenantPubliclyVisible(t *testing.T) {
 	if _, err := onboarding.SaveProgress(ctx, created.ID, SaveOnboardingProgressInput{CurrentStep: "business_profile"}); err != nil {
 		t.Fatalf("SaveProgress() error = %v", err)
 	}
+	// Vertical Onboarding F6 made a valid IANA timezone part of the completion
+	// prerequisites, which this test predates. Set it through the real profile
+	// path rather than writing the column directly, so the fixture keeps
+	// exercising production code rather than reproducing it.
+	timezone := "Africa/Lagos"
+	if _, err := tenants.UpdateProfile(ctx, created.ID, repository.TenantProfileUpdate{Timezone: &timezone}); err != nil {
+		t.Fatalf("setting business timezone: %v", err)
+	}
 	if _, err := onboarding.Complete(ctx, created.ID); err != nil {
 		t.Fatalf("Complete() error = %v", err)
 	}

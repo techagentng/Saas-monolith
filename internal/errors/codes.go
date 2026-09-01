@@ -24,7 +24,19 @@ const (
 	CodeRoleNotFound                  ErrorCode = "ROLE_NOT_FOUND"
 	CodePermissionNotFound            ErrorCode = "PERMISSION_NOT_FOUND"
 	CodeRoleAssignmentAlreadyExists   ErrorCode = "ROLE_ASSIGNMENT_ALREADY_EXISTS"
-	CodeRateLimited                   ErrorCode = "RATE_LIMITED"
-	CodeServiceUnavailable            ErrorCode = "SERVICE_UNAVAILABLE"
-	CodeInternalError                 ErrorCode = "INTERNAL_ERROR"
+	// Google OAuth / OpenID Connect. These exist because the generic codes
+	// cannot distinguish causes the frontend must present differently: a
+	// denied consent screen is the user's own choice and deserves no alarming
+	// copy, while an unverified Google email is a hard stop the user cannot
+	// retry their way out of. No code here ever carries a Google error string,
+	// an authorization code, or a token.
+	CodeOAuthStateInvalid         ErrorCode = "OAUTH_STATE_INVALID"
+	CodeOAuthDenied               ErrorCode = "OAUTH_DENIED"
+	CodeOAuthExchangeFailed       ErrorCode = "OAUTH_EXCHANGE_FAILED"
+	CodeOAuthInvalidIdentityToken ErrorCode = "OAUTH_INVALID_IDENTITY_TOKEN"
+	CodeOAuthEmailUnverified      ErrorCode = "OAUTH_EMAIL_UNVERIFIED"
+	CodeExternalIdentityConflict  ErrorCode = "EXTERNAL_IDENTITY_CONFLICT"
+	CodeRateLimited               ErrorCode = "RATE_LIMITED"
+	CodeServiceUnavailable        ErrorCode = "SERVICE_UNAVAILABLE"
+	CodeInternalError             ErrorCode = "INTERNAL_ERROR"
 )

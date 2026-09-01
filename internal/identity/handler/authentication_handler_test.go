@@ -180,3 +180,6 @@ func (s *fakeAuthenticationService) Logout(_ context.Context, sessionID string) 
 	s.loggedOut = sessionID
 	return s.createErr
 }
+func (s *fakeAuthenticationService) IssueForUser(context.Context, *model.User) (*service.AuthenticationResult, error) {
+	return s.result, s.createErr
+}
