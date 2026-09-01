@@ -53,3 +53,18 @@ type OnboardingRepository interface {
 	// the service layer's responsibility (OnboardingService.Complete).
 	CompleteOnboarding(ctx context.Context, tenantID string) (*model.Tenant, error)
 }
+
+// CurrencyRepository is deliberately separate from TenantRepository for the
+// same reason OnboardingRepository is: tenant currency (Scheduling S1) is a
+// distinct concern from tenant creation/retrieval/profile management, and
+// keeping it on its own narrow interface means the many existing
+// TenantRepository fakes across these tests never need to grow a currency
+// method they don't use. PostgresTenantRepository implements all three
+// interfaces on the same underlying struct.
+type CurrencyRepository interface {
+	FindByID(ctx context.Context, id string) (*model.Tenant, error)
+	// SetCurrency writes only the currency column, unconditionally at the SQL
+	// level. It has no awareness of whether the tenant already has one — the
+	// write-once rule belongs to the service layer (CurrencyService.Set).
+	SetCurrency(ctx context.Context, tenantID string, currency string) (*model.Tenant, error)
+}

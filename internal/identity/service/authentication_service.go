@@ -27,6 +27,14 @@ type AuthenticationService interface {
 	Login(ctx context.Context, input LoginInput) (*AuthenticationResult, error)
 	Refresh(ctx context.Context, refreshToken string) (*AuthenticationResult, error)
 	Logout(ctx context.Context, sessionID string) error
+	// IssueForUser mints the ordinary application session for an already
+	// authenticated user. It exists so a federated sign-in (Google) produces
+	// the identical session, refresh credential and access token that password
+	// login produces, rather than growing a second session architecture
+	// alongside this one. It performs no credential check of its own — the
+	// caller is responsible for having actually authenticated the user, and
+	// for rejecting a non-ACTIVE one.
+	IssueForUser(ctx context.Context, user *model.User) (*AuthenticationResult, error)
 }
 
 type authenticationService struct {
@@ -85,6 +93,13 @@ func (s *authenticationService) Refresh(ctx context.Context, refreshToken string
 		return nil, apperrors.New(apperrors.CodeSessionRevoked, "session revoked", err)
 	}
 	return &AuthenticationResult{User: user, AccessToken: access, RefreshToken: raw, ExpiresIn: int64(s.tokens.config.AccessLifetime.Seconds())}, nil
+}
+
+func (s *authenticationService) IssueForUser(ctx context.Context, user *model.User) (*AuthenticationResult, error) {
+	if user == nil || user.Status != model.StatusActive {
+		return nil, apperrors.New(apperrors.CodeInvalidCredentials, "invalid credentials", nil)
+	}
+	return s.issue(ctx, user)
 }
 
 func (s *authenticationService) Logout(ctx context.Context, sessionID string) error {

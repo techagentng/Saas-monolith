@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -37,7 +38,33 @@ type Config struct {
 	// cross-site deployment must set "None", which browsers only honor
 	// together with Secure.
 	CookieSameSite string
+	// Google OAuth (Sign in with Google). The whole feature is optional: with
+	// none of the four variables set the API starts normally and the two
+	// /api/v1/auth/google routes report SERVICE_UNAVAILABLE. Setting any one
+	// of them declares intent to enable it, and startup then requires all
+	// four — a half-configured OAuth deployment fails at boot rather than
+	// failing per-request in front of a user.
+	//
+	// GoogleClientSecret is never logged, never returned by any handler, and
+	// never reaches the browser: the authorization-code exchange happens
+	// server-side only.
+	GoogleClientID     string
+	GoogleClientSecret string
+	// GoogleRedirectURL is the absolute URL Google redirects back to. It must
+	// exactly equal the callback route this API registers
+	// (/api/v1/auth/google/callback) and must be registered verbatim in the
+	// Google Cloud console.
+	GoogleRedirectURL string
+	// FrontendURL is the browser application's origin. It is the only
+	// destination the OAuth callback will ever redirect to; every post-login
+	// path is resolved relative to it, which is what makes an open redirect
+	// structurally impossible (see identity/handler.SafeRedirectTarget).
+	FrontendURL string
 }
+
+// GoogleOAuthEnabled reports whether Sign in with Google is configured. Load
+// guarantees this is all-or-nothing, so checking one field is sufficient.
+func (c Config) GoogleOAuthEnabled() bool { return c.GoogleClientID != "" }
 
 func Load() (Config, error) { return load(os.LookupEnv) }
 
@@ -83,6 +110,9 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 	// instead of shipping a session that cannot persist.
 	if c.CookieSameSite == "None" && !c.CookieSecure {
 		return Config{}, fmt.Errorf("COOKIE_SAMESITE=None requires COOKIE_SECURE=true")
+	}
+	if err := c.loadGoogleOAuth(lookup); err != nil {
+		return Config{}, err
 	}
 	privateValue := get(lookup, "ED25519_PRIVATE_KEY", "")
 	publicValue := get(lookup, "ED25519_PUBLIC_KEY", "")
@@ -170,4 +200,75 @@ func decodeKey(value string, size int) ([]byte, error) {
 		return nil, fmt.Errorf("must be base64 encoded and %d bytes", size)
 	}
 	return decoded, nil
+}
+
+// loadGoogleOAuth reads the optional Sign in with Google settings.
+//
+// The feature is all-or-nothing on purpose. A deployment that sets, say,
+// GOOGLE_CLIENT_ID and GOOGLE_REDIRECT_URL but forgets GOOGLE_CLIENT_SECRET
+// would otherwise boot happily and then fail the code exchange after the user
+// has already authenticated at Google — a confusing dead end that is far
+// harder to diagnose than a refused startup.
+func (c *Config) loadGoogleOAuth(lookup func(string) (string, bool)) error {
+	c.GoogleClientID = get(lookup, "GOOGLE_CLIENT_ID", "")
+	c.GoogleClientSecret = get(lookup, "GOOGLE_CLIENT_SECRET", "")
+	c.GoogleRedirectURL = get(lookup, "GOOGLE_REDIRECT_URL", "")
+	c.FrontendURL = strings.TrimRight(get(lookup, "FRONTEND_URL", ""), "/")
+
+	present := 0
+	for _, value := range []string{c.GoogleClientID, c.GoogleClientSecret, c.GoogleRedirectURL, c.FrontendURL} {
+		if value != "" {
+			present++
+		}
+	}
+	if present == 0 {
+		return nil
+	}
+	for key, value := range map[string]string{
+		"GOOGLE_CLIENT_ID":     c.GoogleClientID,
+		"GOOGLE_CLIENT_SECRET": c.GoogleClientSecret,
+		"GOOGLE_REDIRECT_URL":  c.GoogleRedirectURL,
+		"FRONTEND_URL":         c.FrontendURL,
+	} {
+		if value == "" {
+			return fmt.Errorf("%s is required when Google OAuth is configured", key)
+		}
+	}
+	if err := requireAbsoluteURL("GOOGLE_REDIRECT_URL", c.GoogleRedirectURL); err != nil {
+		return err
+	}
+	if err := requireAbsoluteURL("FRONTEND_URL", c.FrontendURL); err != nil {
+		return err
+	}
+	// Google will not redirect to a path other than the one registered in the
+	// console, but a mismatch between this value and the route this binary
+	// actually serves produces a redirect_uri_mismatch that is only visible
+	// on Google's own error page. Catching it here names the real problem.
+	if !strings.HasSuffix(c.GoogleRedirectURL, GoogleCallbackPath) {
+		return fmt.Errorf("GOOGLE_REDIRECT_URL must end with %s", GoogleCallbackPath)
+	}
+	// Production is HTTPS end to end. Allowing http:// there would put the
+	// authorization code, and then the session cookie, on a plaintext hop.
+	if c.Env == "production" || c.Env == "prod" {
+		for key, value := range map[string]string{"GOOGLE_REDIRECT_URL": c.GoogleRedirectURL, "FRONTEND_URL": c.FrontendURL} {
+			if !strings.HasPrefix(value, "https://") {
+				return fmt.Errorf("%s must use https in production", key)
+			}
+		}
+	}
+	return nil
+}
+
+// GoogleCallbackPath is the path segment of the OAuth callback route. It is
+// declared here rather than in the router so configuration validation and
+// route registration can never drift apart; internal/app asserts the route it
+// registers against it.
+const GoogleCallbackPath = "/api/v1/auth/google/callback"
+
+func requireAbsoluteURL(key, value string) error {
+	parsed, err := url.Parse(value)
+	if err != nil || !parsed.IsAbs() || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return fmt.Errorf("%s must be an absolute http(s) URL", key)
+	}
+	return nil
 }

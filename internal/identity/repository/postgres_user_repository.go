@@ -11,11 +11,22 @@ import (
 	"github.com/techagentng/saas-monolith/internal/identity/model"
 )
 
-type PostgresUserRepository struct {
-	db *sql.DB
+// dbtx is satisfied by both *sql.DB and *sql.Tx, letting the identity
+// repositories run standalone or inside a caller-owned transaction. Creating a
+// user and their external identity together has to be atomic (see
+// service.GoogleAuthenticationService), and this is the same seam
+// internal/tenant/repository already uses for the same reason.
+type dbtx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-func NewPostgresUserRepository(db *sql.DB) *PostgresUserRepository {
+type PostgresUserRepository struct {
+	db dbtx
+}
+
+func NewPostgresUserRepository(db dbtx) *PostgresUserRepository {
 	return &PostgresUserRepository{db: db}
 }
 
