@@ -209,12 +209,14 @@ func TestDownMigrationRemovesOnlyTheS1Additions(t *testing.T) {
 	db := openSchedulingTestDB(t)
 	ctx := context.Background()
 
-	// Applied newest-first, the order a real rollback uses. S3's migrations are
-	// included because staff_services holds a composite foreign key into
-	// services: rolling S1 back while S3 is still applied is not a legal
-	// database state, and pretending otherwise would test a rollback nobody can
-	// actually perform.
+	// Applied newest-first, the order a real rollback uses. S3's and S5's
+	// migrations are included because staff_services and staff_working_hours
+	// both hold a composite foreign key into services/staff_profiles: rolling
+	// S1 back while S3 or S5 is still applied is not a legal database state,
+	// and pretending otherwise would test a rollback nobody can actually
+	// perform.
 	for _, migration := range []string{
+		"000015_create_staff_working_hours.down.sql",
 		"000013_seed_staff_permissions.down.sql",
 		"000012_create_staff_profiles_and_capabilities.down.sql",
 		"000011_seed_service_permissions.down.sql",

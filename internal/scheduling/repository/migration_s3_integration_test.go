@@ -243,14 +243,21 @@ func TestS3DownMigrationRemovesOnlyTheS3Additions(t *testing.T) {
 	db := openSchedulingTestDB(t)
 	ctx := context.Background()
 
+	// Applied newest-first. S5's migration is included because
+	// staff_working_hours holds a composite foreign key into staff_profiles:
+	// rolling S3 back while S5 is still applied is not a legal database
+	// state, the same accommodation this file's own TestDownMigration...
+	// sibling in migration_s1_integration_test.go already makes for S3 on
+	// top of S1.
 	for _, migration := range []string{
+		"000015_create_staff_working_hours.down.sql",
 		"000013_seed_staff_permissions.down.sql",
 		"000012_create_staff_profiles_and_capabilities.down.sql",
 	} {
 		applySchedulingMigration(t, db, migration)
 	}
 
-	for _, table := range []string{"staff_services", "staff_profiles"} {
+	for _, table := range []string{"staff_working_hours", "staff_services", "staff_profiles"} {
 		var exists bool
 		if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)", table).Scan(&exists); err != nil {
 			t.Fatal(err)
