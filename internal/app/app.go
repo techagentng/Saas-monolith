@@ -90,6 +90,20 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	)
 	staffHandler := schedulinghandler.NewStaffHandler(staffService)
 
+	// Scheduling S5: recurring weekly working hours for a staff profile.
+	// Deliberately not appointment slots, breaks, holidays, one-off
+	// exceptions, or an availability calculation — S7's availability engine
+	// will read this table; nothing here computes bookable time. It reuses
+	// staff.read / staff.update rather than a new permission, the same
+	// reasoning capability assignment already established: this changes a
+	// staff profile's configuration, not a distinct authorization concern.
+	workingHoursService := schedulingservice.NewWorkingHoursService(
+		db,
+		schedulingrepository.NewPostgresWorkingHoursRepository(db),
+		schedulingrepository.NewPostgresStaffRepository(db),
+	)
+	workingHoursHandler := schedulinghandler.NewWorkingHoursHandler(workingHoursService)
+
 	roles := authzrepository.NewPostgresRoleRepository(db)
 	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
 	userRoles := authzrepository.NewPostgresUserRoleRepository(db)
@@ -320,6 +334,25 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.update"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				staffHandler.ReplaceCapabilities(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
+			}),
+		),
+	)))
+
+	// Scheduling S5 working hours:
+	//   GET  /api/v1/tenants/{tenantID}/staff/{staffID}/working-hours  TENANT  staff.read
+	//   PUT  /api/v1/tenants/{tenantID}/staff/{staffID}/working-hours  TENANT  staff.update
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	api.Handle("GET /api/v1/tenants/{tenantID}/staff/{staffID}/working-hours", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				workingHoursHandler.Get(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
+			}),
+		),
+	)))
+	api.Handle("PUT /api/v1/tenants/{tenantID}/staff/{staffID}/working-hours", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				workingHoursHandler.Replace(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
 			}),
 		),
 	)))

@@ -37,12 +37,16 @@ var schedulingMigrations = []string{
 	"000011_seed_service_permissions.up.sql",
 	"000012_create_staff_profiles_and_capabilities.up.sql",
 	"000013_seed_staff_permissions.up.sql",
+	// 000014_create_user_identities is Google OAuth (unrelated to scheduling)
+	// and deliberately not applied here — this chain only needs the
+	// migrations scheduling actually depends on.
+	"000015_create_staff_working_hours.up.sql",
 }
 
 // schedulingTables is the drop order — children before parents, so foreign keys
 // never block the reset.
 var schedulingTables = []string{
-	"staff_services", "staff_profiles", "services", "user_roles", "role_permissions", "permissions", "roles",
+	"staff_working_hours", "staff_services", "staff_profiles", "services", "user_roles", "role_permissions", "permissions", "roles",
 	"tenant_memberships", "sessions", "tenants", "users",
 }
 
