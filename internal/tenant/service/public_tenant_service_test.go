@@ -232,6 +232,68 @@ func TestPublicTenantIdentityExcludesPrivateFields(t *testing.T) {
 	}
 }
 
+// --- ResolvePublicTenant: the internal context downstream public features use
+
+func TestResolvePublicTenantReturnsTheInternalContext(t *testing.T) {
+	tenant := activeSlugTenant()
+	currency := "NGN"
+	tenant.Currency = &currency
+	repo := &slugLookupRepository{tenant: tenant}
+
+	resolved, err := NewPublicTenantService(repo).ResolvePublicTenant(context.Background(), "acme-salon")
+	if err != nil {
+		t.Fatalf("ResolvePublicTenant() error = %v", err)
+	}
+	if resolved.TenantID != tenant.ID {
+		t.Fatalf("TenantID = %q, want %q", resolved.TenantID, tenant.ID)
+	}
+	if resolved.BusinessType == nil || *resolved.BusinessType != model.BusinessTypeNailTechnician {
+		t.Fatalf("BusinessType = %v, want NAIL_TECHNICIAN", resolved.BusinessType)
+	}
+	if resolved.Currency == nil || *resolved.Currency != "NGN" {
+		t.Fatalf("Currency = %v, want NGN", resolved.Currency)
+	}
+	if resolved.Identity.Slug != "acme-salon" || resolved.Identity.Name != "Acme Salon" {
+		t.Fatalf("Identity = %#v", resolved.Identity)
+	}
+}
+
+// The gate must be byte-for-byte the same one GetBySlug applies: a slug that
+// GetBySlug hides must be hidden here too, with the identical error code.
+func TestResolvePublicTenantAppliesTheSameVisibilityGate(t *testing.T) {
+	cases := []struct {
+		name    string
+		slug    string
+		mutate  func(*model.Tenant)
+		wantErr apperrors.ErrorCode
+	}{
+		{"reserved slug", "admin", nil, apperrors.CodeTenantNotFound},
+		{"non-canonical slug", "Acme_Salon", nil, apperrors.CodeTenantSlugInvalid},
+		{"unknown slug", "no-such-tenant", nil, apperrors.CodeTenantNotFound},
+		{"disabled", "acme-salon", func(tn *model.Tenant) { tn.Status = model.StatusDisabled }, apperrors.CodeTenantNotFound},
+		{"in progress", "acme-salon", func(tn *model.Tenant) { tn.OnboardingStatus = model.OnboardingStatusInProgress }, apperrors.CodeTenantNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tenant := activeSlugTenant()
+			if tc.mutate != nil {
+				tc.mutate(tenant)
+			}
+			repo := &slugLookupRepository{tenant: tenant}
+
+			_, err := NewPublicTenantService(repo).ResolvePublicTenant(context.Background(), tc.slug)
+			assertPublicCode(t, err, tc.wantErr)
+
+			gbsTenant := activeSlugTenant()
+			if tc.mutate != nil {
+				tc.mutate(gbsTenant)
+			}
+			_, gbsErr := NewPublicTenantService(&slugLookupRepository{tenant: gbsTenant}).GetBySlug(context.Background(), tc.slug)
+			assertPublicCode(t, gbsErr, tc.wantErr)
+		})
+	}
+}
+
 func TestPublicTenantServicePropagatesRepositoryFailure(t *testing.T) {
 	repo := &slugLookupRepository{err: errors.New("connection reset")}
 	_, err := NewPublicTenantService(repo).GetBySlug(context.Background(), "acme-salon")

@@ -401,6 +401,53 @@ func TestCapabilityAssignmentRoundTrips(t *testing.T) {
 	}
 }
 
+// TestListStaffIDsForServiceIsTenantScoped exercises the S9 reverse lookup: the
+// staff assigned to one service, isolated by tenant.
+func TestListStaffIDsForServiceIsTenantScoped(t *testing.T) {
+	db := openSchedulingTestDB(t)
+	staffRepo := NewPostgresStaffRepository(db)
+	serviceRepo := NewPostgresServiceRepository(db)
+	capabilities := NewPostgresCapabilityRepository(db)
+	ctx := context.Background()
+	currency := "NGN"
+	seedTenant(t, db, integrationTenantA, "tenant-a", &currency)
+	seedTenant(t, db, integrationTenantB, "tenant-b", &currency)
+
+	svcA, err := serviceRepo.Create(ctx, newService("550e8400-e29b-41d4-a716-4466554504a1", integrationTenantA, "Manicure"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ada, err := staffRepo.Create(ctx, newStaff("550e8400-e29b-41d4-a716-4466554504a2", integrationTenantA, "Ada", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cara, err := staffRepo.Create(ctx, newStaff("550e8400-e29b-41d4-a716-4466554504a3", integrationTenantA, "Cara", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, staffID := range []string{ada.ID, cara.ID} {
+		if err := capabilities.Assign(ctx, integrationTenantA, staffID, svcA.ID); err != nil {
+			t.Fatalf("Assign() error = %v", err)
+		}
+	}
+
+	got, err := capabilities.ListStaffIDsForService(ctx, integrationTenantA, svcA.ID)
+	if err != nil {
+		t.Fatalf("ListStaffIDsForService() error = %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("staff for service = %v, want both Ada and Cara", got)
+	}
+
+	crossTenant, err := capabilities.ListStaffIDsForService(ctx, integrationTenantB, svcA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(crossTenant) != 0 {
+		t.Fatalf("cross-tenant lookup returned %v, want none", crossTenant)
+	}
+}
+
 func TestDuplicateCapabilityIsRejected(t *testing.T) {
 	db := openSchedulingTestDB(t)
 	staffRepo := NewPostgresStaffRepository(db)

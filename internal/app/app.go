@@ -103,6 +103,99 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	)
 	workingHoursHandler := schedulinghandler.NewWorkingHoursHandler(workingHoursService)
 
+	// Scheduling S7: the appointment-vertical availability engine. It reads
+	// (never writes) the S1 catalog, S3 capability set and S5 working hours,
+	// resolves them against the tenant's own authoritative timezone, and
+	// returns the bookable slots for one service with one technician on one
+	// date. The pure slot maths lives in internal/scheduling/availability.
+	//
+	// Booking-conflict exclusion is now live (S10): the S7 OccupancyReader seam
+	// is wired to the booking repository, so every persisted CONFIRMED booking
+	// removes the slots it covers from this engine's output. SystemClock is
+	// injected rather than calling time.Now() inside the domain logic so
+	// past-slot filtering stays deterministic.
+	//
+	// It reuses staff.read: from the caller's side this is reading a
+	// technician's bookable time, the same authorization concern the
+	// working-hours GET already carries. The anonymous public availability API
+	// is S9 and is deliberately not registered here.
+	bookingRepository := schedulingrepository.NewPostgresBookingRepository(db)
+	availabilityService := schedulingservice.NewAvailabilityService(
+		tenants,
+		serviceRepository,
+		schedulingrepository.NewPostgresStaffRepository(db),
+		schedulingrepository.NewPostgresCapabilityRepository(db),
+		schedulingrepository.NewPostgresWorkingHoursRepository(db),
+		bookingRepository,
+		schedulingservice.SystemClock{},
+	)
+	availabilityHandler := schedulinghandler.NewAvailabilityHandler(availabilityService)
+
+	// Scheduling S8: the anonymous, customer-facing view of a NAIL_TECHNICIAN
+	// tenant's service catalog — the first screen of the public booking journey
+	// (/book/{slug} on the frontend). It reuses the existing public slug gate
+	// (PublicTenantService.ResolvePublicTenant: reserved / canonical /
+	// ACTIVE+COMPLETED) rather than re-checking visibility, enforces the
+	// NAIL_TECHNICIAN vertical, and exposes only customer-safe service fields
+	// (no status, no timestamps, no tenant id). Public availability is S9;
+	// booking creation is S10.
+	publicCatalogService := schedulingservice.NewPublicCatalogService(publicTenantService, serviceRepository)
+	publicServiceHandler := schedulinghandler.NewPublicServiceHandler(publicCatalogService)
+
+	// Scheduling S9: the anonymous public availability flow — steps 2 and 3 of
+	// the /book/{slug} journey. Both reuse the identical PublicTenantService
+	// visibility gate (reserved / canonical / ACTIVE+COMPLETED) and the
+	// NAIL_TECHNICIAN vertical check S8 uses; neither re-implements it.
+	//
+	//   - PublicStaffService lists the ACTIVE, bookable technicians assigned to
+	//     a service, projected to {id, name} only.
+	//   - PublicAvailabilityService is a thin gate over the S7 engine: it
+	//     resolves the slug to an internal tenant id and delegates to
+	//     availabilityService.GetAvailability — the slot maths, capability
+	//     check and timezone resolution are S7's and are not duplicated.
+	//
+	publicStaffService := schedulingservice.NewPublicStaffService(
+		publicTenantService,
+		serviceRepository,
+		schedulingrepository.NewPostgresStaffRepository(db),
+		schedulingrepository.NewPostgresCapabilityRepository(db),
+	)
+	publicStaffHandler := schedulinghandler.NewPublicStaffHandler(publicStaffService)
+	publicAvailabilityService := schedulingservice.NewPublicAvailabilityService(publicTenantService, availabilityService)
+	publicAvailabilityHandler := schedulinghandler.NewPublicAvailabilityHandler(publicAvailabilityService)
+
+	// Scheduling S10: anonymous appointment booking creation — the step that
+	// turns an S9 slot selection into a persisted appointment. It reuses the
+	// same PublicTenantService gate and NAIL_TECHNICIAN check S8/S9 use, and it
+	// re-validates the requested slot against the S7 engine (never trusting the
+	// client because a slot was returned earlier). The bookings_no_overlap
+	// exclusion constraint in migration 000016 is the concurrency authority:
+	// exactly one of two racing customers wins, the other gets
+	// BOOKING_SLOT_UNAVAILABLE (409). Service duration and the appointment end
+	// are derived server-side; a client-supplied end/duration/price is ignored.
+	bookingService := schedulingservice.NewBookingService(
+		publicTenantService,
+		availabilityService,
+		serviceRepository,
+		schedulingrepository.NewPostgresStaffRepository(db),
+		bookingRepository,
+	)
+	publicBookingHandler := schedulinghandler.NewPublicBookingHandler(bookingService)
+
+	// Scheduling S11: authenticated, tenant-scoped owner/staff booking
+	// management — list, detail, and cancel for the appointments S10 persists.
+	// It reads and cancels only; it never creates, and it touches no
+	// scheduling logic. Cancelling flips CONFIRMED -> CANCELLED in place (the
+	// row is kept), and because the S7 occupancy query already counts only
+	// CONFIRMED bookings, the freed slot reappears in public S9 availability
+	// with no change to the engine. booking.read / booking.update (migration
+	// 000017) gate the routes; SystemClock splits Upcoming from Past on
+	// absolute start_at.
+	bookingManagementService := schedulingservice.NewBookingManagementService(
+		bookingRepository, bookingRepository, tenants, schedulingservice.SystemClock{},
+	)
+	bookingManagementHandler := schedulinghandler.NewBookingManagementHandler(bookingManagementService)
+
 	roles := authzrepository.NewPostgresRoleRepository(db)
 	rolePermissions := authzrepository.NewPostgresRolePermissionRepository(db)
 	userRoles := authzrepository.NewPostgresUserRoleRepository(db)
@@ -127,6 +220,37 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// response DTO carries no internal identifiers or private contact data.
 	api.HandleFunc("GET /api/v1/public/tenants/{slug}", func(writer http.ResponseWriter, request *http.Request) {
 		publicTenantHandler.GetBySlug(writer, request, request.PathValue("slug"))
+	})
+	// Public service catalog (Scheduling S8): the anonymous NAIL_TECHNICIAN
+	// booking catalog. Registered here, alongside the public tenant route and
+	// before the auth middleware exists, for the identical reason — the slug is
+	// the public identity and this must never be wrapped into a private chain.
+	// The service delegates the visibility gate to PublicTenantService, refuses
+	// non-nail verticals, and returns only ACTIVE services with customer-safe
+	// fields.
+	api.HandleFunc("GET /api/v1/public/tenants/{slug}/services", func(writer http.ResponseWriter, request *http.Request) {
+		publicServiceHandler.List(writer, request, request.PathValue("slug"))
+	})
+	// Public technician discovery (Scheduling S9): the customer-safe list of
+	// technicians who can perform one service. Anonymous, same slug gate,
+	// NAIL_TECHNICIAN only, {id, name} projection.
+	api.HandleFunc("GET /api/v1/public/tenants/{slug}/services/{serviceID}/staff", func(writer http.ResponseWriter, request *http.Request) {
+		publicStaffHandler.List(writer, request, request.PathValue("slug"), request.PathValue("serviceID"))
+	})
+	// Public availability (Scheduling S9): the S7 slot engine behind the public
+	// slug gate. Anonymous. ?service_id=&staff_id=&date=YYYY-MM-DD; the date is
+	// tenant-local and a caller-supplied timezone is ignored.
+	api.HandleFunc("GET /api/v1/public/tenants/{slug}/availability", func(writer http.ResponseWriter, request *http.Request) {
+		publicAvailabilityHandler.Get(writer, request, request.PathValue("slug"))
+	})
+	// Public booking creation (Scheduling S10): the anonymous POST that
+	// persists an appointment. Same bare-mux, pre-auth-middleware registration
+	// as every other public route — it must never be wrapped in a private
+	// chain. Body carries identifiers + selected start + customer contact only;
+	// the backend derives tenant, duration, end and timezone. A concurrent
+	// conflict is a deterministic 409 BOOKING_SLOT_UNAVAILABLE.
+	api.HandleFunc("POST /api/v1/public/tenants/{slug}/bookings", func(writer http.ResponseWriter, request *http.Request) {
+		publicBookingHandler.Create(writer, request, request.PathValue("slug"))
 	})
 
 	authMiddleware := auth.Middleware{Tokens: tokens, Sessions: sessions}
@@ -341,6 +465,50 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.update"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				workingHoursHandler.Replace(writer, request, request.PathValue("tenantID"), request.PathValue("staffID"))
+			}),
+		),
+	)))
+
+	// Scheduling S7 availability (tenant-management / dashboard only — the
+	// anonymous public availability API is S9 and is deliberately not
+	// registered here):
+	//   GET  /api/v1/tenants/{tenantID}/availability  TENANT  staff.read
+	//        ?service_id=...&staff_id=...&date=YYYY-MM-DD
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	api.Handle("GET /api/v1/tenants/{tenantID}/availability", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				availabilityHandler.Get(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+
+	// Scheduling S11 owner booking management (tenant-management / dashboard):
+	//   GET  /api/v1/tenants/{tenantID}/bookings                       TENANT  booking.read
+	//        ?view=upcoming|past|cancelled|all&staff_id=...&service_id=...
+	//   GET  /api/v1/tenants/{tenantID}/bookings/{bookingID}           TENANT  booking.read
+	//   POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/cancel    TENANT  booking.update
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	// Cancellation carries booking.update, not a bespoke code: it changes a
+	// booking's state, and there is deliberately no booking.cancel permission.
+	api.Handle("GET /api/v1/tenants/{tenantID}/bookings", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				bookingManagementHandler.List(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/bookings/{bookingID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				bookingManagementHandler.Get(writer, request, request.PathValue("tenantID"), request.PathValue("bookingID"))
+			}),
+		),
+	)))
+	api.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/cancel", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				bookingManagementHandler.Cancel(writer, request, request.PathValue("tenantID"), request.PathValue("bookingID"))
 			}),
 		),
 	)))

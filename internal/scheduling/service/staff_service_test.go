@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -127,6 +128,21 @@ func (r *fakeCapabilityRepository) ListServiceIDs(_ context.Context, _ string, s
 		return []string{}, nil
 	}
 	return append([]string{}, ids...), nil
+}
+
+func (r *fakeCapabilityRepository) ListStaffIDsForService(_ context.Context, _ string, serviceID string) ([]string, error) {
+	r.listCalls++
+	var staffIDs []string
+	for staffID, ids := range r.assignments {
+		for _, id := range ids {
+			if id == serviceID {
+				staffIDs = append(staffIDs, staffID)
+				break
+			}
+		}
+	}
+	sort.Strings(staffIDs)
+	return staffIDs, nil
 }
 
 func (r *fakeCapabilityRepository) DeleteAll(_ context.Context, _ string, staffID string) error {

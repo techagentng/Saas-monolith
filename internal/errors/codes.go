@@ -24,7 +24,17 @@ const (
 	CodeRoleNotFound                  ErrorCode = "ROLE_NOT_FOUND"
 	CodePermissionNotFound            ErrorCode = "PERMISSION_NOT_FOUND"
 	CodeRoleAssignmentAlreadyExists   ErrorCode = "ROLE_ASSIGNMENT_ALREADY_EXISTS"
-	CodeRateLimited                   ErrorCode = "RATE_LIMITED"
+	// CodeBookingSlotUnavailable is returned when a requested appointment time
+	// cannot be booked — it is in the past, outside working hours, across a
+	// split-shift gap, or (the concurrency case) another customer's booking
+	// now overlaps it. All of these resolve the same way for the customer:
+	// pick another time. Maps to 409, distinct from a 400 validation failure.
+	CodeBookingSlotUnavailable ErrorCode = "BOOKING_SLOT_UNAVAILABLE"
+	// CodeBookingNotFound is returned when a booking id does not resolve within
+	// the caller's tenant — whether it never existed or belongs to another
+	// tenant, which are deliberately indistinguishable. Maps to 404.
+	CodeBookingNotFound ErrorCode = "BOOKING_NOT_FOUND"
+	CodeRateLimited     ErrorCode = "RATE_LIMITED"
 	CodeServiceUnavailable            ErrorCode = "SERVICE_UNAVAILABLE"
 	CodeInternalError                 ErrorCode = "INTERNAL_ERROR"
 )

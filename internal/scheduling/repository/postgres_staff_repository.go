@@ -234,6 +234,31 @@ func (r *PostgresCapabilityRepository) ListServiceIDs(ctx context.Context, tenan
 	return serviceIDs, nil
 }
 
+// ListStaffIDsForService is ListServiceIDs run the other way round — the staff
+// assigned to one service. Scoped by tenant_id so a service id belonging to
+// another tenant returns nothing rather than that tenant's roster.
+func (r *PostgresCapabilityRepository) ListStaffIDsForService(ctx context.Context, tenantID string, serviceID string) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx,
+		"SELECT staff_id FROM staff_services WHERE service_id = $1 AND tenant_id = $2 ORDER BY staff_id ASC",
+		serviceID, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("listing staff for service: %w", err)
+	}
+	defer rows.Close()
+	staffIDs := []string{}
+	for rows.Next() {
+		var staffID string
+		if err := rows.Scan(&staffID); err != nil {
+			return nil, fmt.Errorf("scanning staff for service: %w", err)
+		}
+		staffIDs = append(staffIDs, staffID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating staff for service: %w", err)
+	}
+	return staffIDs, nil
+}
+
 func (r *PostgresCapabilityRepository) DeleteAll(ctx context.Context, tenantID string, staffID string) error {
 	if _, err := r.db.ExecContext(ctx, "DELETE FROM staff_services WHERE staff_id = $1 AND tenant_id = $2", staffID, tenantID); err != nil {
 		return fmt.Errorf("clearing staff capabilities: %w", err)
