@@ -16,6 +16,7 @@ const (
 	CodeTenantNotFound                ErrorCode = "TENANT_NOT_FOUND"
 	CodeServiceNotFound               ErrorCode = "SERVICE_NOT_FOUND"
 	CodeStaffNotFound                 ErrorCode = "STAFF_NOT_FOUND"
+	CodeCategoryNotFound              ErrorCode = "CATEGORY_NOT_FOUND"
 	CodeTenantSlugTaken               ErrorCode = "TENANT_SLUG_TAKEN"
 	CodeTenantSlugInvalid             ErrorCode = "TENANT_SLUG_INVALID"
 	CodeUserAlreadyExists             ErrorCode = "USER_ALREADY_EXISTS"
@@ -33,8 +34,8 @@ const (
 	// CodeBookingNotFound is returned when a booking id does not resolve within
 	// the caller's tenant — whether it never existed or belongs to another
 	// tenant, which are deliberately indistinguishable. Maps to 404.
-	CodeBookingNotFound ErrorCode = "BOOKING_NOT_FOUND"
-	CodeRateLimited     ErrorCode = "RATE_LIMITED"
-	CodeServiceUnavailable            ErrorCode = "SERVICE_UNAVAILABLE"
-	CodeInternalError                 ErrorCode = "INTERNAL_ERROR"
+	CodeBookingNotFound    ErrorCode = "BOOKING_NOT_FOUND"
+	CodeRateLimited        ErrorCode = "RATE_LIMITED"
+	CodeServiceUnavailable ErrorCode = "SERVICE_UNAVAILABLE"
+	CodeInternalError      ErrorCode = "INTERNAL_ERROR"
 )

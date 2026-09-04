@@ -34,6 +34,13 @@ type PublicServiceView struct {
 	Description     *string
 	DurationMinutes int
 	PriceMinor      int64
+	// Category is the category's Name, resolved server-side from the
+	// service's internal CategoryID — never the id itself, which is an
+	// internal identifier with no meaning to a customer and is never part of
+	// this DTO. nil for an uncategorised service, and also for a service
+	// whose category row cannot be resolved (defensive: a missing category
+	// must degrade the display, never break the whole public catalog).
+	Category *string
 }
 
 // PublicCatalog is the whole public-catalog response: the bookable services
@@ -70,12 +77,13 @@ type PublicCatalogService interface {
 }
 
 type publicCatalogService struct {
-	tenants  PublicTenantResolver
-	services repository.ServiceRepository
+	tenants    PublicTenantResolver
+	services   repository.ServiceRepository
+	categories repository.ServiceCategoryRepository
 }
 
-func NewPublicCatalogService(tenants PublicTenantResolver, services repository.ServiceRepository) PublicCatalogService {
-	return &publicCatalogService{tenants: tenants, services: services}
+func NewPublicCatalogService(tenants PublicTenantResolver, services repository.ServiceRepository, categories repository.ServiceCategoryRepository) PublicCatalogService {
+	return &publicCatalogService{tenants: tenants, services: services, categories: categories}
 }
 
 func (s *publicCatalogService) GetCatalog(ctx context.Context, slug string) (*PublicCatalog, error) {
@@ -108,17 +116,70 @@ func (s *publicCatalogService) GetCatalog(ctx context.Context, slug string) (*Pu
 		return nil, err
 	}
 
+	// Resolved once for the whole listing rather than per service, so an
+	// N-service catalog costs one extra query, not N — and skipped entirely
+	// when nothing in this listing references a category, so a tenant with
+	// no categories yet (or a caller with no category repository configured)
+	// never pays for or requires the lookup. Every status is included, not
+	// just ACTIVE: a service can stay ACTIVE while its category is archived
+	// (see model.ServiceCategory's own doc comment), and its name should
+	// still resolve for that service's row.
+	var categoryNames map[string]string
+	if hasCategorizedService(stored) {
+		categoryNames, err = s.categoryNamesByID(ctx, resolved.TenantID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	views := make([]PublicServiceView, 0, len(stored))
 	for _, svc := range stored {
+		var category *string
+		if svc.CategoryID != nil {
+			if name, ok := categoryNames[*svc.CategoryID]; ok {
+				category = &name
+			}
+			// A miss here means a category referenced by a service could not
+			// be resolved — defensively treated as uncategorised for display
+			// rather than failing the whole public catalog.
+		}
 		views = append(views, PublicServiceView{
 			ID:              svc.ID,
 			Name:            svc.Name,
 			Description:     svc.Description,
 			DurationMinutes: svc.DurationMinutes,
 			PriceMinor:      svc.PriceMinor,
+			Category:        category,
 		})
 	}
 	return &PublicCatalog{Currency: resolved.Currency, Services: views}, nil
+}
+
+// hasCategorizedService reports whether any service in the listing carries a
+// CategoryID, so GetCatalog can skip the category lookup entirely when there
+// is nothing for it to resolve.
+func hasCategorizedService(stored []*model.Service) bool {
+	for _, svc := range stored {
+		if svc.CategoryID != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// categoryNamesByID loads every one of the tenant's categories, regardless of
+// status, into an id -> name lookup for GetCatalog's single pass over the
+// service list.
+func (s *publicCatalogService) categoryNamesByID(ctx context.Context, tenantID string) (map[string]string, error) {
+	categories, err := s.categories.ListByTenant(ctx, tenantID, repository.ServiceCategoryListFilter{})
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[string]string, len(categories))
+	for _, category := range categories {
+		names[category.ID] = category.Name
+	}
+	return names, nil
 }
 
 // compile-time guards.

@@ -22,6 +22,11 @@ type CreateServiceInput struct {
 	Description     *string
 	DurationMinutes int
 	PriceMinor      int64
+	// CategoryID is optional: nil files the service as uncategorised, exactly
+	// the state every pre-SC1 service already has. When supplied it must name
+	// an existing category belonging to this tenant — validated in Create,
+	// not left to the database's own composite foreign key to discover.
+	CategoryID *string
 }
 
 // UpdateServiceInput carries a partial update. Only non-nil fields change.
@@ -35,6 +40,14 @@ type UpdateServiceInput struct {
 	Description     *string
 	DurationMinutes *int
 	PriceMinor      *int64
+	// CategoryID is a pointer-to-pointer, the same tri-state shape
+	// repository.ServiceUpdate.CategoryID uses and for the identical reason: a
+	// plain *string can express "set" and "leave alone" but never "clear".
+	//   nil                  -> leave the current category unchanged
+	//   pointer to nil       -> clear it (service becomes uncategorised)
+	//   pointer to a string  -> assign it, after verifying it belongs to this
+	//                           tenant
+	CategoryID **string
 }
 
 // TenantReader is the narrow slice of tenant persistence this module needs:
@@ -46,6 +59,20 @@ type UpdateServiceInput struct {
 // business knowing how to create or update a tenant.
 type TenantReader interface {
 	FindByID(ctx context.Context, id string) (*tenantmodel.Tenant, error)
+}
+
+// CategoryReader is the narrow slice of category persistence CatalogService
+// needs: enough to prove a category id names a real row belonging to this
+// tenant before a service is filed under it. Declared here, in the consumer,
+// the same interface-segregation reasoning behind TenantReader — this module
+// has no business creating, listing, or archiving categories itself.
+//
+// FindByID does not filter by status: assigning a service to an ARCHIVED
+// category is allowed. Archiving only hides the category's own grouping from
+// listings; a service already filed under it — or newly filed under it by an
+// owner who changed their mind — stays exactly as valid.
+type CategoryReader interface {
+	FindByID(ctx context.Context, tenantID string, categoryID string) (*model.ServiceCategory, error)
 }
 
 // CatalogService owns the service-catalog rules: validation, the currency
@@ -70,12 +97,17 @@ type CatalogService interface {
 }
 
 type catalogService struct {
-	services repository.ServiceRepository
-	tenants  TenantReader
+	services   repository.ServiceRepository
+	tenants    TenantReader
+	categories CategoryReader
 }
 
-func NewCatalogService(services repository.ServiceRepository, tenants TenantReader) CatalogService {
-	return &catalogService{services: services, tenants: tenants}
+// NewCatalogService wires the catalog's dependencies. categories may be nil
+// only for a caller that never supplies a CategoryID — Create and Update both
+// skip it entirely when the field is absent, so a caller with no category
+// concept yet (existing tests, cmd/seedverify) is not forced to fake one.
+func NewCatalogService(services repository.ServiceRepository, tenants TenantReader, categories CategoryReader) CatalogService {
+	return &catalogService{services: services, tenants: tenants, categories: categories}
 }
 
 // ParseStatusFilter converts the list endpoint's status query parameter into a
@@ -128,6 +160,11 @@ func (s *catalogService) Create(ctx context.Context, tenantID string, input Crea
 		return nil, err
 	}
 
+	categoryID, err := s.validateCategoryAssignment(ctx, tenantID, input.CategoryID)
+	if err != nil {
+		return nil, err
+	}
+
 	return s.services.Create(ctx, &model.Service{
 		ID:              uuid.NewString(),
 		TenantID:        tenantID,
@@ -135,10 +172,38 @@ func (s *catalogService) Create(ctx context.Context, tenantID string, input Crea
 		Description:     description,
 		DurationMinutes: input.DurationMinutes,
 		PriceMinor:      input.PriceMinor,
+		CategoryID:      categoryID,
 		// Status is left unset so the repository's own defaulting applies,
 		// producing ACTIVE. There is no path through this method by which a
 		// caller influences it.
 	})
+}
+
+// validateCategoryAssignment proves candidate, when supplied, both parses as
+// a UUID and names a category belonging to tenantID. A nil candidate passes
+// straight through as "no category" — this is the single choke point Create
+// and Update both funnel through, so the tenant-safety rule cannot drift
+// between the two call sites.
+//
+// A malformed id and one belonging to another tenant are refused with the
+// identical VALIDATION_FAILED message: from the caller's side, a category id
+// is input data on this request, not the resource the endpoint is about, so a
+// bad one is a request-validation failure rather than a 404 — the same
+// division StaffService.ReplaceCapabilities draws for a foreign service id in
+// a capability set. The shared message is also what keeps this from
+// disclosing whether that id exists under a different tenant.
+func (s *catalogService) validateCategoryAssignment(ctx context.Context, tenantID string, candidate *string) (*string, error) {
+	if candidate == nil {
+		return nil, nil
+	}
+	if _, err := uuid.Parse(*candidate); err != nil {
+		return nil, apperrors.New(apperrors.CodeValidationFailed, "invalid service category id", err)
+	}
+	if _, err := s.categories.FindByID(ctx, tenantID, *candidate); err != nil {
+		return nil, apperrors.New(apperrors.CodeValidationFailed, "service category does not belong to this tenant", err)
+	}
+	categoryID := *candidate
+	return &categoryID, nil
 }
 
 // resolveCurrency loads the tenant's currency and proves the requested price is
@@ -219,6 +284,16 @@ func (s *catalogService) Update(ctx context.Context, tenantID string, serviceID 
 			return nil, err
 		}
 		update.PriceMinor = input.PriceMinor
+	}
+	if input.CategoryID != nil {
+		// *input.CategoryID is itself the tri-state value: nil means "clear",
+		// a non-nil pointer means "assign this one" and is routed through the
+		// same tenant-safety check Create uses.
+		categoryID, err := s.validateCategoryAssignment(ctx, tenantID, *input.CategoryID)
+		if err != nil {
+			return nil, err
+		}
+		update.CategoryID = &categoryID
 	}
 
 	if update.IsEmpty() {

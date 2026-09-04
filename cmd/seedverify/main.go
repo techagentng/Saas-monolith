@@ -126,10 +126,11 @@ func run() error {
 	capabilityRepository := schedulingrepository.NewPostgresCapabilityRepository(db)
 	workingHoursRepository := schedulingrepository.NewPostgresWorkingHoursRepository(db)
 
-	catalogService := schedulingservice.NewCatalogService(serviceRepository, tenants)
+	categoryRepository := schedulingrepository.NewPostgresServiceCategoryRepository(db)
+	catalogService := schedulingservice.NewCatalogService(serviceRepository, tenants, categoryRepository)
 	staffService := schedulingservice.NewStaffService(db, staffRepository, capabilityRepository, serviceRepository, memberships)
 	workingHoursService := schedulingservice.NewWorkingHoursService(db, workingHoursRepository, staffRepository)
-	publicCatalogService := schedulingservice.NewPublicCatalogService(publicTenantService, serviceRepository)
+	publicCatalogService := schedulingservice.NewPublicCatalogService(publicTenantService, serviceRepository, categoryRepository)
 
 	suffix := fmt.Sprintf("%d", time.Now().Unix())
 	ownerEmail := fmt.Sprintf("dev-owner-%s@example.test", suffix)

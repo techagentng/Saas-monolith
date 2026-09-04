@@ -71,9 +71,20 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// the tenant only to resolve its currency before a price is accepted, so it
 	// is handed the tenant repository through its own narrow TenantReader
 	// interface rather than the whole tenant service.
+	//
+	// SC1: tenant-scoped service categories. CatalogService is handed the
+	// category repository through its own narrow CategoryReader interface, the
+	// same interface-segregation reasoning TenantReader already uses, so it
+	// can validate a category assignment belongs to this tenant without
+	// depending on the wider CategoryService.
 	serviceRepository := schedulingrepository.NewPostgresServiceRepository(db)
-	catalogService := schedulingservice.NewCatalogService(serviceRepository, tenants)
+	categoryRepository := schedulingrepository.NewPostgresServiceCategoryRepository(db)
+	catalogService := schedulingservice.NewCatalogService(serviceRepository, tenants, categoryRepository)
 	serviceHandler := schedulinghandler.NewServiceHandler(catalogService)
+	categoryService := schedulingservice.NewCategoryService(categoryRepository)
+	categoryHandler := schedulinghandler.NewServiceCategoryHandler(categoryService)
+	suggestionService := schedulingservice.NewSuggestionService(tenants)
+	suggestionHandler := schedulinghandler.NewSuggestionHandler(suggestionService)
 
 	// Scheduling S3: bookable staff and the services each of them performs. The
 	// module validates a profile's optional user link against tenant membership,
@@ -139,7 +150,7 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// NAIL_TECHNICIAN vertical, and exposes only customer-safe service fields
 	// (no status, no timestamps, no tenant id). Public availability is S9;
 	// booking creation is S10.
-	publicCatalogService := schedulingservice.NewPublicCatalogService(publicTenantService, serviceRepository)
+	publicCatalogService := schedulingservice.NewPublicCatalogService(publicTenantService, serviceRepository, categoryRepository)
 	publicServiceHandler := schedulinghandler.NewPublicServiceHandler(publicCatalogService)
 
 	// Scheduling S9: the anonymous public availability flow — steps 2 and 3 of
@@ -379,6 +390,66 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.archive"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				serviceHandler.Archive(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+
+	// SC1 service categories. Reuses the catalog's own service.* permissions
+	// rather than a parallel category.* family — see CategoryService's doc
+	// comment for why — so no new permission migration is needed.
+	//
+	// Route authorization matrix:
+	//   POST   /api/v1/tenants/{tenantID}/service-categories                    TENANT  service.create
+	//   GET    /api/v1/tenants/{tenantID}/service-categories                    TENANT  service.read
+	//   GET    /api/v1/tenants/{tenantID}/service-categories/{categoryID}       TENANT  service.read
+	//   PATCH  /api/v1/tenants/{tenantID}/service-categories/{categoryID}       TENANT  service.update
+	//   POST   /api/v1/tenants/{tenantID}/service-categories/{categoryID}/archive TENANT service.archive
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	api.Handle("POST /api/v1/tenants/{tenantID}/service-categories", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.create"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				categoryHandler.Create(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/service-categories", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				categoryHandler.List(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/service-categories/{categoryID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				categoryHandler.Get(writer, request, request.PathValue("tenantID"), request.PathValue("categoryID"))
+			}),
+		),
+	)))
+	api.Handle("PATCH /api/v1/tenants/{tenantID}/service-categories/{categoryID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				categoryHandler.Update(writer, request, request.PathValue("tenantID"), request.PathValue("categoryID"))
+			}),
+		),
+	)))
+	api.Handle("POST /api/v1/tenants/{tenantID}/service-categories/{categoryID}/archive", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.archive"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				categoryHandler.Archive(writer, request, request.PathValue("tenantID"), request.PathValue("categoryID"))
+			}),
+		),
+	)))
+
+	// SC1 starter-service suggestions: a read-only, backend-owned catalogue
+	// (internal/scheduling/suggestions), never a database row. Reuses
+	// service.read — this is a read of catalog-adjacent reference data, the
+	// same category the service listing itself falls into.
+	//   GET /api/v1/tenants/{tenantID}/service-suggestions  TENANT  service.read
+	api.Handle("GET /api/v1/tenants/{tenantID}/service-suggestions", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				suggestionHandler.List(writer, request, request.PathValue("tenantID"))
 			}),
 		),
 	)))

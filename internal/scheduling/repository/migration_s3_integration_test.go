@@ -227,10 +227,14 @@ func TestS3MigrationLeavesS1ServiceGrantsIntact(t *testing.T) {
 		t.Fatalf("STAFF service grants = %v, want [service.read]", got)
 	}
 
-	// And Epic 01's own catalog is untouched.
+	// And Epic 01's own catalog is untouched. booking.% is excluded alongside
+	// service.%/staff.% for the same reason its S1 sibling test does: S10/S11's
+	// migration 000017 (which openSchedulingTestDB also applies) added it
+	// after this test was first written, and it is a scheduling permission
+	// family, not part of the pre-existing catalog this assertion is about.
 	var preExisting int
 	err := db.QueryRowContext(context.Background(),
-		"SELECT COUNT(*) FROM permissions WHERE code NOT LIKE 'service.%' AND code NOT LIKE 'staff.%'").Scan(&preExisting)
+		"SELECT COUNT(*) FROM permissions WHERE code NOT LIKE 'service.%' AND code NOT LIKE 'staff.%' AND code NOT LIKE 'booking.%'").Scan(&preExisting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,8 +252,15 @@ func TestS3DownMigrationRemovesOnlyTheS3Additions(t *testing.T) {
 	// rolling S3 back while S5 is still applied is not a legal database
 	// state, the same accommodation this file's own TestDownMigration...
 	// sibling in migration_s1_integration_test.go already makes for S3 on
-	// top of S1.
+	// top of S1. S10/S11's bookings migrations (000016-000018) are included
+	// for the identical reason, added after this test was first written:
+	// bookings holds a composite foreign key into staff_profiles, so rolling
+	// S3 back while bookings is still applied is equally not a legal
+	// database state.
 	for _, migration := range []string{
+		"000018_add_booking_status_index.down.sql",
+		"000017_seed_booking_permissions.down.sql",
+		"000016_create_bookings.down.sql",
 		"000015_create_staff_working_hours.down.sql",
 		"000013_seed_staff_permissions.down.sql",
 		"000012_create_staff_profiles_and_capabilities.down.sql",
@@ -257,7 +268,7 @@ func TestS3DownMigrationRemovesOnlyTheS3Additions(t *testing.T) {
 		applySchedulingMigration(t, db, migration)
 	}
 
-	for _, table := range []string{"staff_working_hours", "staff_services", "staff_profiles"} {
+	for _, table := range []string{"bookings", "staff_working_hours", "staff_services", "staff_profiles"} {
 		var exists bool
 		if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)", table).Scan(&exists); err != nil {
 			t.Fatal(err)

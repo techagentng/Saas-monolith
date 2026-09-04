@@ -53,7 +53,15 @@ func TestOnboardingCompletionMakesTenantPubliclyVisible(t *testing.T) {
 		t.Fatal("GetBySlug() succeeded despite a denied completion")
 	}
 
-	// Real F2 flow: save progress, then complete.
+	// Real F2 flow: save progress, then complete. F6 additionally requires a
+	// business timezone before completion (validateOnboardingCompletionPrerequisites)
+	// — the real business_profile step collects it via UpdateProfile, which
+	// Create() itself has no column for, so it is set here the same way a
+	// genuine business_profile submission would.
+	timezone := "Africa/Lagos"
+	if _, err := tenants.UpdateProfile(ctx, created.ID, repository.TenantProfileUpdate{Timezone: &timezone}); err != nil {
+		t.Fatalf("UpdateProfile(timezone) error = %v", err)
+	}
 	if _, err := onboarding.SaveProgress(ctx, created.ID, SaveOnboardingProgressInput{CurrentStep: "business_profile"}); err != nil {
 		t.Fatalf("SaveProgress() error = %v", err)
 	}

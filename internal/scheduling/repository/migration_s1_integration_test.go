@@ -108,10 +108,14 @@ func TestMigrationSeedsExactlyTheFourServicePermissions(t *testing.T) {
 	// The pre-existing catalog must be untouched. Counted as "everything that is
 	// not a scheduling permission" rather than as an absolute total, so this
 	// assertion stays about S1 instead of becoming a tripwire that every later
-	// feature migration has to bump.
+	// feature migration has to bump. booking.% (added later by S10/S11's
+	// migration 000017, which openSchedulingTestDB also applies) is excluded
+	// here for the same reason service.%/staff.% are: it is a scheduling
+	// permission family, not part of the pre-existing catalog this assertion
+	// is actually about.
 	var preExisting int
 	err = db.QueryRowContext(context.Background(),
-		"SELECT COUNT(*) FROM permissions WHERE code NOT LIKE 'service.%' AND code NOT LIKE 'staff.%'").Scan(&preExisting)
+		"SELECT COUNT(*) FROM permissions WHERE code NOT LIKE 'service.%' AND code NOT LIKE 'staff.%' AND code NOT LIKE 'booking.%'").Scan(&preExisting)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,14 +176,20 @@ func TestMigrationLeavesTheExistingRBACCatalogIntact(t *testing.T) {
 		t.Fatalf("roles = %d, want the 3 pre-existing roles and no new ones", roles)
 	}
 
-	// BUSINESS_OWNER's original 9 non-service grants must all still be present.
+	// BUSINESS_OWNER's original 9 non-service grants must all still be
+	// present. booking.% is excluded alongside service.%/staff.% for the same
+	// reason TestMigrationSeedsExactlyTheFourServicePermissions excludes it:
+	// S10/S11's migration 000017 (which openSchedulingTestDB also applies)
+	// granted BUSINESS_OWNER booking.read/booking.update after this test was
+	// first written, and those are scheduling grants, not part of the
+	// pre-existing catalog this assertion is about.
 	var ownerNonService int
 	err := db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM role_permissions rp
 JOIN roles r       ON r.id = rp.role_id
 JOIN permissions p ON p.id = rp.permission_id
-WHERE r.name = 'BUSINESS_OWNER' AND p.code NOT LIKE 'service.%' AND p.code NOT LIKE 'staff.%'`).Scan(&ownerNonService)
+WHERE r.name = 'BUSINESS_OWNER' AND p.code NOT LIKE 'service.%' AND p.code NOT LIKE 'staff.%' AND p.code NOT LIKE 'booking.%'`).Scan(&ownerNonService)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,13 +197,15 @@ WHERE r.name = 'BUSINESS_OWNER' AND p.code NOT LIKE 'service.%' AND p.code NOT L
 		t.Fatalf("BUSINESS_OWNER non-service grants = %d, want the original 9", ownerNonService)
 	}
 
+	// Same accommodation for STAFF, which migration 000017 also granted
+	// booking.read.
 	var staffNonService int
 	err = db.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM role_permissions rp
 JOIN roles r       ON r.id = rp.role_id
 JOIN permissions p ON p.id = rp.permission_id
-WHERE r.name = 'STAFF' AND p.code NOT LIKE 'service.%' AND p.code NOT LIKE 'staff.%'`).Scan(&staffNonService)
+WHERE r.name = 'STAFF' AND p.code NOT LIKE 'service.%' AND p.code NOT LIKE 'staff.%' AND p.code NOT LIKE 'booking.%'`).Scan(&staffNonService)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,8 +226,15 @@ func TestDownMigrationRemovesOnlyTheS1Additions(t *testing.T) {
 	// both hold a composite foreign key into services/staff_profiles: rolling
 	// S1 back while S3 or S5 is still applied is not a legal database state,
 	// and pretending otherwise would test a rollback nobody can actually
-	// perform.
+	// perform. S10/S11's bookings migrations (000016-000018) are included for
+	// the identical reason, added after this test was first written: bookings
+	// holds a composite foreign key into staff_profiles (and another into
+	// services), so rolling S1 back while bookings is still applied is
+	// equally not a legal database state.
 	for _, migration := range []string{
+		"000018_add_booking_status_index.down.sql",
+		"000017_seed_booking_permissions.down.sql",
+		"000016_create_bookings.down.sql",
 		"000015_create_staff_working_hours.down.sql",
 		"000013_seed_staff_permissions.down.sql",
 		"000012_create_staff_profiles_and_capabilities.down.sql",
@@ -247,15 +266,18 @@ func TestDownMigrationRemovesOnlyTheS1Additions(t *testing.T) {
 		t.Fatal("the down migration left tenants.currency behind")
 	}
 
+	// booking.% is included alongside service.%/staff.% because this test's
+	// rollback sequence now also reverses bookings (necessary for the FK
+	// ordering above), so its permissions must be gone too.
 	var schedulingPermissions int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM permissions WHERE code LIKE 'service.%' OR code LIKE 'staff.%'").Scan(&schedulingPermissions); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM permissions WHERE code LIKE 'service.%' OR code LIKE 'staff.%' OR code LIKE 'booking.%'").Scan(&schedulingPermissions); err != nil {
 		t.Fatal(err)
 	}
 	if schedulingPermissions != 0 {
 		t.Fatalf("the down migrations left %d scheduling permissions behind", schedulingPermissions)
 	}
 
-	for _, table := range []string{"staff_services", "staff_profiles"} {
+	for _, table := range []string{"bookings", "staff_services", "staff_profiles"} {
 		var exists bool
 		if err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)", table).Scan(&exists); err != nil {
 			t.Fatal(err)

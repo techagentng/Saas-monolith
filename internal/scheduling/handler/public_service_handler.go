@@ -30,6 +30,11 @@ type PublicCatalogItem struct {
 	Description     *string `json:"description"`
 	DurationMinutes int     `json:"duration_minutes"`
 	PriceMinor      int64   `json:"price_minor"`
+	// Category is the category's display name, or null for an uncategorised
+	// service. There is deliberately no category_id field: it is an internal
+	// identifier with no meaning to an anonymous customer, the same reasoning
+	// that already keeps tenant_id and status off this DTO.
+	Category *string `json:"category"`
 }
 
 // PublicCatalogResponse is the whole payload: the currency prices are in
@@ -64,6 +69,7 @@ func (h *PublicServiceHandler) List(writer http.ResponseWriter, request *http.Re
 			Description:     svc.Description,
 			DurationMinutes: svc.DurationMinutes,
 			PriceMinor:      svc.PriceMinor,
+			Category:        svc.Category,
 		}
 	}
 	writeJSON(writer, http.StatusOK, PublicCatalogResponse{Currency: catalog.Currency, Services: items})

@@ -209,14 +209,18 @@ func TestGetCatalogReturnsOnlyTheResolvedTenantsServices(t *testing.T) {
 // --- DTO surface ----------------------------------------------------
 
 func TestPublicServiceViewExposesOnlyCustomerSafeFields(t *testing.T) {
-	want := map[string]bool{"ID": true, "Name": true, "Description": true, "DurationMinutes": true, "PriceMinor": true}
+	// Category is sanctioned (SC1): it carries the category's Name only, never
+	// CategoryID — an internal identifier with no meaning to a customer, the
+	// same reasoning that already keeps status, tenant id, and timestamps off
+	// this DTO.
+	want := map[string]bool{"ID": true, "Name": true, "Description": true, "DurationMinutes": true, "PriceMinor": true, "Category": true}
 	structType := reflect.TypeOf(PublicServiceView{})
 	if structType.NumField() != len(want) {
 		t.Fatalf("PublicServiceView has %d fields, want %d", structType.NumField(), len(want))
 	}
 	for i := 0; i < structType.NumField(); i++ {
 		if name := structType.Field(i).Name; !want[name] {
-			t.Fatalf("PublicServiceView exposes unexpected field %q — no status, tenant id, or timestamps belong here", name)
+			t.Fatalf("PublicServiceView exposes unexpected field %q — no status, tenant id, category id, or timestamps belong here", name)
 		}
 	}
 }
@@ -225,12 +229,12 @@ func TestPublicServiceViewExposesOnlyCustomerSafeFields(t *testing.T) {
 
 func newCatalogFixture(resolver *fakePublicTenantResolver) (*fakeServiceRepository, PublicCatalogService) {
 	services := newFakeServiceRepository()
-	return services, NewPublicCatalogService(resolver, services)
+	return services, NewPublicCatalogService(resolver, services, nil)
 }
 
 func newCatalogFixtureWith(t *testing.T, resolver *fakePublicTenantResolver, seed func(*fakeServiceRepository)) (*fakeServiceRepository, PublicCatalogService) {
 	t.Helper()
 	services := newFakeServiceRepository()
 	seed(services)
-	return services, NewPublicCatalogService(resolver, services)
+	return services, NewPublicCatalogService(resolver, services, nil)
 }

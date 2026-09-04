@@ -60,7 +60,7 @@ func openCapabilityTestDB(t *testing.T) *sql.DB {
 		t.Skipf("database is unavailable: %v", err)
 	}
 
-	tables := []string{"staff_services", "staff_profiles", "services", "user_roles", "role_permissions", "permissions", "roles", "tenant_memberships", "sessions", "tenants", "users"}
+	tables := []string{"staff_services", "staff_profiles", "services", "service_categories", "user_roles", "role_permissions", "permissions", "roles", "tenant_memberships", "sessions", "tenants", "users"}
 	drop := func() {
 		for _, table := range tables {
 			db.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+table+" CASCADE")
@@ -81,6 +81,7 @@ func openCapabilityTestDB(t *testing.T) *sql.DB {
 		"000011_seed_service_permissions.up.sql",
 		"000012_create_staff_profiles_and_capabilities.up.sql",
 		"000013_seed_staff_permissions.up.sql",
+		"000019_create_service_categories.up.sql",
 	} {
 		contents, err := os.ReadFile(filepath.Join("..", "..", "..", "migrations", migration))
 		if err != nil {

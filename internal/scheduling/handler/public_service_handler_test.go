@@ -68,6 +68,37 @@ func TestPublicServiceListShapesTheResponse(t *testing.T) {
 	}
 }
 
+// SC1: the public DTO exposes category (the name) and never category_id.
+func TestPublicServiceListExposesCategoryNameNeverCategoryID(t *testing.T) {
+	category := "Pedicures"
+	fake := &fakePublicCatalogService{result: &service.PublicCatalog{
+		Currency: strp("NGN"),
+		Services: []service.PublicServiceView{
+			{ID: "s1", Name: "Spa Pedicure", DurationMinutes: 60, PriceMinor: 2999, Category: &category},
+			{ID: "s2", Name: "Uncategorised Add-On", DurationMinutes: 15, PriceMinor: 999, Category: nil},
+		},
+	}}
+	handler := NewPublicServiceHandler(fake)
+	recorder := httptest.NewRecorder()
+
+	handler.List(recorder, httptest.NewRequest(http.MethodGet, "/", nil), "glamour-nails")
+
+	body := decodeBody(t, recorder)
+	services := body["services"].([]any)
+	categorised := services[0].(map[string]any)
+	if categorised["category"] != "Pedicures" {
+		t.Fatalf("category = %v, want %q", categorised["category"], "Pedicures")
+	}
+	if _, present := categorised["category_id"]; present {
+		t.Fatal("public catalog item exposed category_id — an internal identifier that must never reach an anonymous customer")
+	}
+
+	uncategorised := services[1].(map[string]any)
+	if uncategorised["category"] != nil {
+		t.Fatalf("category = %v, want null for an uncategorised service", uncategorised["category"])
+	}
+}
+
 func TestPublicServiceListSerializesAnEmptyCatalogAsEmptyArray(t *testing.T) {
 	fake := &fakePublicCatalogService{result: &service.PublicCatalog{Currency: strp("NGN"), Services: nil}}
 	handler := NewPublicServiceHandler(fake)
