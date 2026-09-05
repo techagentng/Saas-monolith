@@ -26,7 +26,11 @@ func corsMiddleware(allowedOrigins []string, next http.Handler) http.Handler {
 			writer.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 		if request.Method == http.MethodOptions && request.Header.Get("Access-Control-Request-Method") != "" {
-			writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			// PUT is used by the write-once endpoints (tenant currency, staff
+			// service capabilities, staff working hours). A browser preflight
+			// for any of them fails unless PUT is listed here, so it must stay
+			// in sync with the methods the router actually registers.
+			writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 			writer.Header().Set("Access-Control-Max-Age", "600")
 			writer.WriteHeader(http.StatusNoContent)

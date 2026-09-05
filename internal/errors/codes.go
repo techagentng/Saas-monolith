@@ -16,6 +16,7 @@ const (
 	CodeTenantNotFound                ErrorCode = "TENANT_NOT_FOUND"
 	CodeServiceNotFound               ErrorCode = "SERVICE_NOT_FOUND"
 	CodeStaffNotFound                 ErrorCode = "STAFF_NOT_FOUND"
+	CodeCategoryNotFound              ErrorCode = "CATEGORY_NOT_FOUND"
 	CodeTenantSlugTaken               ErrorCode = "TENANT_SLUG_TAKEN"
 	CodeTenantSlugInvalid             ErrorCode = "TENANT_SLUG_INVALID"
 	CodeUserAlreadyExists             ErrorCode = "USER_ALREADY_EXISTS"
@@ -24,6 +25,16 @@ const (
 	CodeRoleNotFound                  ErrorCode = "ROLE_NOT_FOUND"
 	CodePermissionNotFound            ErrorCode = "PERMISSION_NOT_FOUND"
 	CodeRoleAssignmentAlreadyExists   ErrorCode = "ROLE_ASSIGNMENT_ALREADY_EXISTS"
+	// CodeBookingSlotUnavailable is returned when a requested appointment time
+	// cannot be booked — it is in the past, outside working hours, across a
+	// split-shift gap, or (the concurrency case) another customer's booking
+	// now overlaps it. All of these resolve the same way for the customer:
+	// pick another time. Maps to 409, distinct from a 400 validation failure.
+	CodeBookingSlotUnavailable ErrorCode = "BOOKING_SLOT_UNAVAILABLE"
+	// CodeBookingNotFound is returned when a booking id does not resolve within
+	// the caller's tenant — whether it never existed or belongs to another
+	// tenant, which are deliberately indistinguishable. Maps to 404.
+	CodeBookingNotFound ErrorCode = "BOOKING_NOT_FOUND"
 	// Google OAuth / OpenID Connect. These exist because the generic codes
 	// cannot distinguish causes the frontend must present differently: a
 	// denied consent screen is the user's own choice and deserves no alarming

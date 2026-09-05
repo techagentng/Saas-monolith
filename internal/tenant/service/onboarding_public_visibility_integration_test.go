@@ -53,17 +53,17 @@ func TestOnboardingCompletionMakesTenantPubliclyVisible(t *testing.T) {
 		t.Fatal("GetBySlug() succeeded despite a denied completion")
 	}
 
-	// Real F2 flow: save progress, then complete.
-	if _, err := onboarding.SaveProgress(ctx, created.ID, SaveOnboardingProgressInput{CurrentStep: "business_profile"}); err != nil {
-		t.Fatalf("SaveProgress() error = %v", err)
-	}
-	// Vertical Onboarding F6 made a valid IANA timezone part of the completion
-	// prerequisites, which this test predates. Set it through the real profile
-	// path rather than writing the column directly, so the fixture keeps
-	// exercising production code rather than reproducing it.
+	// Real F2 flow: save progress, then complete. F6 additionally requires a
+	// business timezone before completion (validateOnboardingCompletionPrerequisites)
+	// — the real business_profile step collects it via UpdateProfile, which
+	// Create() itself has no column for, so it is set here the same way a
+	// genuine business_profile submission would.
 	timezone := "Africa/Lagos"
 	if _, err := tenants.UpdateProfile(ctx, created.ID, repository.TenantProfileUpdate{Timezone: &timezone}); err != nil {
-		t.Fatalf("setting business timezone: %v", err)
+		t.Fatalf("UpdateProfile(timezone) error = %v", err)
+	}
+	if _, err := onboarding.SaveProgress(ctx, created.ID, SaveOnboardingProgressInput{CurrentStep: "business_profile"}); err != nil {
+		t.Fatalf("SaveProgress() error = %v", err)
 	}
 	if _, err := onboarding.Complete(ctx, created.ID); err != nil {
 		t.Fatalf("Complete() error = %v", err)

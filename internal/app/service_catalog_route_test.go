@@ -451,7 +451,7 @@ func buildCatalogRoutes(t *testing.T, scenario *catalogScenario, tenantPermissio
 	authorizer := authzservice.NewAuthorizer(&fakeResolutionService{tenantPermissions: tenantPermissions})
 
 	services := &statefulServiceRepository{services: scenario.services}
-	catalog := schedulingservice.NewCatalogService(services, tenants)
+	catalog := schedulingservice.NewCatalogService(services, tenants, nil)
 	serviceHandler := schedulinghandler.NewServiceHandler(catalog)
 	currencyHandler := tenanthandler.NewCurrencyHandler(tenantservice.NewCurrencyService(tenants))
 

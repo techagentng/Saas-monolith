@@ -1,0 +1,11 @@
+-- Scheduling S11: the owner dashboard lists a tenant's bookings filtered by
+-- status (Upcoming / Past are CONFIRMED split on start_at; Cancelled is
+-- CANCELLED) and ordered by start_at. Migration 000016 already provides
+-- bookings_tenant_start_idx (tenant_id, start_at) for the occupancy path and
+-- an all-status list; this composite adds status between them so the
+-- status-filtered dashboard queries are a single index range scan rather than
+-- an index scan plus a filter.
+--
+-- It does NOT touch bookings_no_overlap or any other 000016 object — the S10
+-- concurrency guarantee is unchanged.
+CREATE INDEX bookings_tenant_status_start_idx ON bookings (tenant_id, status, start_at);

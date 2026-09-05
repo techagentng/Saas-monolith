@@ -59,6 +59,12 @@ type CapabilityRepository interface {
 	// ListServiceIDs returns the service IDs this staff member can perform, in
 	// a deterministic order.
 	ListServiceIDs(ctx context.Context, tenantID string, staffID string) ([]string, error)
+	// ListStaffIDsForService is the reverse lookup: the staff IDs assigned to
+	// one service, in a deterministic order. Tenant-scoped like every other
+	// method here — a service belonging to another tenant simply yields no
+	// rows. Added for S9's public technician discovery; the tenant-facing S3
+	// UI only ever needs the forward direction.
+	ListStaffIDsForService(ctx context.Context, tenantID string, serviceID string) ([]string, error)
 	// DeleteAll removes every capability row for one staff member.
 	DeleteAll(ctx context.Context, tenantID string, staffID string) error
 	// Assign records one capability. The composite foreign keys on the table

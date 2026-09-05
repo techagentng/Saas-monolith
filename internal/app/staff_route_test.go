@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -549,6 +550,20 @@ func (r *statefulCapabilityRepository) ListServiceIDs(_ context.Context, _ strin
 		return []string{}, nil
 	}
 	return append([]string{}, ids...), nil
+}
+
+func (r *statefulCapabilityRepository) ListStaffIDsForService(_ context.Context, _ string, serviceID string) ([]string, error) {
+	var staffIDs []string
+	for staffID, ids := range r.assignments {
+		for _, id := range ids {
+			if id == serviceID {
+				staffIDs = append(staffIDs, staffID)
+				break
+			}
+		}
+	}
+	sort.Strings(staffIDs)
+	return staffIDs, nil
 }
 
 func (r *statefulCapabilityRepository) DeleteAll(_ context.Context, _ string, staffID string) error {

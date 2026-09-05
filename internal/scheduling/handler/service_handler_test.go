@@ -20,6 +20,10 @@ const (
 	handlerServiceID = "550e8400-e29b-41d4-a716-446655442002"
 )
 
+// categoryID is a var, not a const: some cases below need its address to
+// populate model.Service.CategoryID (*string).
+var categoryID = "550e8400-e29b-41d4-a716-446655442003"
+
 // fakeCatalogService records exactly what the handler passed through, which is
 // how the DTO-protection tests below prove a smuggled field never reached the
 // service layer.
@@ -343,6 +347,100 @@ func TestUpdateIgnoresServerOwnedFieldsSmuggledIntoTheBody(t *testing.T) {
 	response := decodeBody(t, recorder)
 	if response["status"] != string(model.StatusActive) {
 		t.Fatalf("status = %v, want ACTIVE — status is never client-writable through PATCH", response["status"])
+	}
+}
+
+// --- category_id tri-state (SC1) ---------------------------------------------
+
+func TestCreatePassesThroughASuppliedCategoryID(t *testing.T) {
+	catalog := &fakeCatalogService{result: storedService()}
+	handler := NewServiceHandler(catalog)
+	recorder := httptest.NewRecorder()
+
+	body := `{"name":"Gel Manicure","duration_minutes":45,"price_minor":1999,"category_id":"` + categoryID + `"}`
+	handler.Create(recorder, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)), handlerTenantID)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s, want 201", recorder.Code, recorder.Body.String())
+	}
+	if catalog.createInput.CategoryID == nil || *catalog.createInput.CategoryID != categoryID {
+		t.Fatalf("CategoryID = %v, want %q", catalog.createInput.CategoryID, categoryID)
+	}
+}
+
+func TestCreateWithoutCategoryIDLeavesItNil(t *testing.T) {
+	catalog := &fakeCatalogService{result: storedService()}
+	handler := NewServiceHandler(catalog)
+	recorder := httptest.NewRecorder()
+
+	handler.Create(recorder, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"Gel Manicure","duration_minutes":45,"price_minor":1999}`)), handlerTenantID)
+
+	if catalog.createInput.CategoryID != nil {
+		t.Fatalf("CategoryID = %v, want nil when the key is omitted", *catalog.createInput.CategoryID)
+	}
+}
+
+// PATCH's category_id must distinguish three wire states: omitted (leave
+// unchanged), present and null (clear), and present with a value (assign) —
+// a distinction a plain *string cannot make. These three tests prove the
+// nullableCategoryID wrapper reaches UpdateServiceInput.CategoryID's
+// **string tri-state correctly in each case.
+func TestUpdateOmittedCategoryIDLeavesItUnwired(t *testing.T) {
+	catalog := &fakeCatalogService{result: storedService()}
+	handler := NewServiceHandler(catalog)
+	recorder := httptest.NewRecorder()
+
+	handler.Update(recorder, httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"name":"Renamed"}`)), handlerTenantID, handlerServiceID)
+
+	if catalog.updateInput.CategoryID != nil {
+		t.Fatalf("CategoryID = %v, want nil (unwired) when the key is omitted entirely", catalog.updateInput.CategoryID)
+	}
+}
+
+func TestUpdateExplicitNullCategoryIDRequestsClear(t *testing.T) {
+	catalog := &fakeCatalogService{result: storedService()}
+	handler := NewServiceHandler(catalog)
+	recorder := httptest.NewRecorder()
+
+	handler.Update(recorder, httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"category_id":null}`)), handlerTenantID, handlerServiceID)
+
+	if catalog.updateInput.CategoryID == nil {
+		t.Fatal("CategoryID = nil, want a non-nil outer pointer for a present key")
+	}
+	if *catalog.updateInput.CategoryID != nil {
+		t.Fatalf("CategoryID inner value = %v, want nil (clear) for an explicit null", **catalog.updateInput.CategoryID)
+	}
+}
+
+func TestUpdateCategoryIDValueRequestsAssignment(t *testing.T) {
+	catalog := &fakeCatalogService{result: storedService()}
+	handler := NewServiceHandler(catalog)
+	recorder := httptest.NewRecorder()
+
+	handler.Update(recorder, httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(`{"category_id":"`+categoryID+`"}`)), handlerTenantID, handlerServiceID)
+
+	if catalog.updateInput.CategoryID == nil || *catalog.updateInput.CategoryID == nil {
+		t.Fatalf("CategoryID = %v, want a set value", catalog.updateInput.CategoryID)
+	}
+	if **catalog.updateInput.CategoryID != categoryID {
+		t.Fatalf("CategoryID inner value = %q, want %q", **catalog.updateInput.CategoryID, categoryID)
+	}
+}
+
+// The authenticated owner-facing DTO exposes the raw category_id — unlike the
+// anonymous public catalog, this caller is managing the assignment itself.
+func TestPublicServiceExposesCategoryID(t *testing.T) {
+	stored := storedService()
+	stored.CategoryID = &categoryID
+	catalog := &fakeCatalogService{result: stored}
+	handler := NewServiceHandler(catalog)
+	recorder := httptest.NewRecorder()
+
+	handler.Get(recorder, httptest.NewRequest(http.MethodGet, "/", nil), handlerTenantID, handlerServiceID)
+
+	response := decodeBody(t, recorder)
+	if response["category_id"] != categoryID {
+		t.Fatalf("category_id = %v, want %q", response["category_id"], categoryID)
 	}
 }
 

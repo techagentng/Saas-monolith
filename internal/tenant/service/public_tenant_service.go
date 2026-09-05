@@ -30,11 +30,33 @@ type PublicTenantIdentity struct {
 	BusinessType *model.BusinessType
 }
 
+// PublicTenantContext is the internal result of resolving a public slug once
+// the visibility gate (reserved / canonical / ACTIVE + COMPLETED) has passed.
+//
+// It carries what a downstream public feature — the S8 service catalog, the S9
+// availability API — needs but PublicTenantIdentity deliberately withholds: the
+// internal tenant UUID, so the feature can scope its own tenant-isolated
+// queries, and the currency prices are denominated in (a tenant-level property
+// since Scheduling S1). It is never serialized; a handler projects only the
+// parts it is allowed to expose, exactly as GetBySlug does for the identity.
+type PublicTenantContext struct {
+	TenantID     string
+	BusinessType *model.BusinessType
+	Currency     *string
+	Identity     PublicTenantIdentity
+}
+
 // PublicTenantService resolves the public identity of a tenant from its slug.
 type PublicTenantService interface {
 	// GetBySlug returns the public identity for a canonical slug. Tenants that
 	// are not publicly visible are reported as not found.
 	GetBySlug(ctx context.Context, slug string) (*PublicTenantIdentity, error)
+	// ResolvePublicTenant applies the identical visibility gate GetBySlug uses
+	// and returns the internal context a downstream public feature needs. It is
+	// the single place that owns "is this slug publicly resolvable" — callers
+	// must consume this rather than re-implementing the gate against the tenant
+	// repository.
+	ResolvePublicTenant(ctx context.Context, slug string) (*PublicTenantContext, error)
 }
 
 type publicTenantService struct {
@@ -46,6 +68,15 @@ func NewPublicTenantService(tenants repository.TenantRepository) PublicTenantSer
 }
 
 func (s *publicTenantService) GetBySlug(ctx context.Context, slug string) (*PublicTenantIdentity, error) {
+	resolved, err := s.ResolvePublicTenant(ctx, slug)
+	if err != nil {
+		return nil, err
+	}
+	identity := resolved.Identity
+	return &identity, nil
+}
+
+func (s *publicTenantService) ResolvePublicTenant(ctx context.Context, slug string) (*PublicTenantContext, error) {
 	// A reserved slug belongs to the platform and can never name a tenant.
 	// It is reported as simply absent so the public surface does not disclose
 	// which names the platform holds back.
@@ -80,12 +111,17 @@ func (s *publicTenantService) GetBySlug(ctx context.Context, slug string) (*Publ
 		return nil, apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", nil)
 	}
 
-	return &PublicTenantIdentity{
-		Slug:         tenant.Slug,
-		Name:         tenant.Name,
-		Description:  tenant.Description,
-		Timezone:     tenant.Timezone,
+	return &PublicTenantContext{
+		TenantID:     tenant.ID,
 		BusinessType: tenant.BusinessType,
+		Currency:     tenant.Currency,
+		Identity: PublicTenantIdentity{
+			Slug:         tenant.Slug,
+			Name:         tenant.Name,
+			Description:  tenant.Description,
+			Timezone:     tenant.Timezone,
+			BusinessType: tenant.BusinessType,
+		},
 	}, nil
 }
 

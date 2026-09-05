@@ -38,14 +38,19 @@ func NewServiceHandler(catalog service.CatalogService) *ServiceHandler {
 // repeating it on every row of a catalog listing would be duplicated state
 // that could appear to disagree with its source.
 type PublicService struct {
-	ID              string       `json:"id"`
-	Name            string       `json:"name"`
-	Description     *string      `json:"description"`
-	DurationMinutes int          `json:"duration_minutes"`
-	PriceMinor      int64        `json:"price_minor"`
-	Status          model.Status `json:"status"`
-	CreatedAt       time.Time    `json:"created_at"`
-	UpdatedAt       time.Time    `json:"updated_at"`
+	ID              string  `json:"id"`
+	Name            string  `json:"name"`
+	Description     *string `json:"description"`
+	DurationMinutes int     `json:"duration_minutes"`
+	PriceMinor      int64   `json:"price_minor"`
+	// CategoryID is the raw internal identifier, unlike the anonymous public
+	// catalog's "category" name field (public_service_handler.go): the owner
+	// dashboard is the authenticated party managing the assignment itself, so
+	// the id — not just its display name — is exactly what it needs back.
+	CategoryID *string      `json:"category_id"`
+	Status     model.Status `json:"status"`
+	CreatedAt  time.Time    `json:"created_at"`
+	UpdatedAt  time.Time    `json:"updated_at"`
 }
 
 // toPublicService is the single conversion point, so the five response sites
@@ -54,8 +59,43 @@ func toPublicService(svc *model.Service) PublicService {
 	return PublicService{
 		ID: svc.ID, Name: svc.Name, Description: svc.Description,
 		DurationMinutes: svc.DurationMinutes, PriceMinor: svc.PriceMinor,
-		Status: svc.Status, CreatedAt: svc.CreatedAt, UpdatedAt: svc.UpdatedAt,
+		CategoryID: svc.CategoryID,
+		Status:     svc.Status, CreatedAt: svc.CreatedAt, UpdatedAt: svc.UpdatedAt,
 	}
+}
+
+// nullableCategoryID captures whether category_id was present in a PATCH body
+// at all — a distinction a plain *string cannot make, since encoding/json
+// leaves an omitted key and an explicit null at the identical zero value.
+//
+// The field on the decode target MUST be this named type by value
+// (`CategoryID nullableCategoryID`), never `*nullableCategoryID`. That is not
+// a style preference: encoding/json's own indirect() short-circuits a
+// settable *pointer* struct field on a null literal — it zeroes the pointer
+// directly and never calls UnmarshalJSON at all, which would make null and
+// "omitted" indistinguishable again, exactly the bug this type exists to
+// avoid. A named non-pointer field is instead auto-addressed by
+// encoding/json, which DOES reach UnmarshalJSON for both null and a string —
+// and, critically, is left completely untouched (kept at its Go zero value,
+// present == false) when the key is absent from the JSON altogether. That is
+// what makes `present` a reliable presence flag.
+type nullableCategoryID struct {
+	present bool
+	value   *string
+}
+
+func (n *nullableCategoryID) UnmarshalJSON(data []byte) error {
+	n.present = true
+	if string(data) == "null" {
+		n.value = nil
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	n.value = &value
+	return nil
 }
 
 // Create handles POST /api/v1/tenants/{tenantID}/services.
@@ -71,6 +111,7 @@ func (h *ServiceHandler) Create(writer http.ResponseWriter, request *http.Reques
 		Description     *string `json:"description"`
 		DurationMinutes int     `json:"duration_minutes"`
 		PriceMinor      int64   `json:"price_minor"`
+		CategoryID      *string `json:"category_id"`
 	}
 	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 		writeSchedulingError(writer, apperrors.New(apperrors.CodeInvalidRequest, "invalid request", err))
@@ -82,6 +123,7 @@ func (h *ServiceHandler) Create(writer http.ResponseWriter, request *http.Reques
 		Description:     input.Description,
 		DurationMinutes: input.DurationMinutes,
 		PriceMinor:      input.PriceMinor,
+		CategoryID:      input.CategoryID,
 	})
 	if err != nil {
 		writeSchedulingError(writer, err)
@@ -128,22 +170,33 @@ func (h *ServiceHandler) Get(writer http.ResponseWriter, request *http.Request, 
 // protection: status, tenant_id, id and currency have nowhere to land.
 func (h *ServiceHandler) Update(writer http.ResponseWriter, request *http.Request, tenantID string, serviceID string) {
 	var input struct {
-		Name            *string `json:"name"`
-		Description     *string `json:"description"`
-		DurationMinutes *int    `json:"duration_minutes"`
-		PriceMinor      *int64  `json:"price_minor"`
+		Name            *string            `json:"name"`
+		Description     *string            `json:"description"`
+		DurationMinutes *int               `json:"duration_minutes"`
+		PriceMinor      *int64             `json:"price_minor"`
+		CategoryID      nullableCategoryID `json:"category_id"`
 	}
 	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
 		writeSchedulingError(writer, apperrors.New(apperrors.CodeInvalidRequest, "invalid request", err))
 		return
 	}
 
-	updated, err := h.catalog.Update(request.Context(), tenantID, serviceID, service.UpdateServiceInput{
+	serviceUpdate := service.UpdateServiceInput{
 		Name:            input.Name,
 		Description:     input.Description,
 		DurationMinutes: input.DurationMinutes,
 		PriceMinor:      input.PriceMinor,
-	})
+	}
+	// input.CategoryID.present is false when the key was omitted entirely —
+	// left unwired, so UpdateServiceInput.CategoryID stays nil ("leave
+	// unchanged"). When the key was present (null or a string),
+	// input.CategoryID.value already carries the tri-state result and is
+	// wired straight through.
+	if input.CategoryID.present {
+		serviceUpdate.CategoryID = &input.CategoryID.value
+	}
+
+	updated, err := h.catalog.Update(request.Context(), tenantID, serviceID, serviceUpdate)
 	if err != nil {
 		writeSchedulingError(writer, err)
 		return

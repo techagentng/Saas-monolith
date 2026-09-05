@@ -108,6 +108,9 @@ func (r *fakeServiceRepository) Update(_ context.Context, tenantID string, id st
 	if update.PriceMinor != nil {
 		stored.PriceMinor = *update.PriceMinor
 	}
+	if update.CategoryID != nil {
+		stored.CategoryID = *update.CategoryID
+	}
 	stored.UpdatedAt = time.Now().UTC()
 	return stored, nil
 }
@@ -166,7 +169,7 @@ func validCreateInput() CreateServiceInput {
 
 func TestCreateStoresValidatedServiceAsActive(t *testing.T) {
 	services := newFakeServiceRepository()
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	description := "  Long-lasting gel finish.  "
 	input := validCreateInput()
@@ -201,7 +204,7 @@ func TestCreateStoresValidatedServiceAsActive(t *testing.T) {
 
 func TestCreateWithoutDescriptionStoresNil(t *testing.T) {
 	services := newFakeServiceRepository()
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	created, err := catalog.Create(context.Background(), tenantA, validCreateInput())
 	if err != nil {
@@ -214,7 +217,7 @@ func TestCreateWithoutDescriptionStoresNil(t *testing.T) {
 
 func TestCreateAllowsFreeService(t *testing.T) {
 	services := newFakeServiceRepository()
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	input := validCreateInput()
 	input.PriceMinor = 0
@@ -230,7 +233,7 @@ func TestCreateAllowsFreeService(t *testing.T) {
 
 func TestCreateRequiresTenantCurrency(t *testing.T) {
 	services := newFakeServiceRepository()
-	catalog := NewCatalogService(services, tenantWithoutCurrency())
+	catalog := NewCatalogService(services, tenantWithoutCurrency(), nil)
 
 	_, err := catalog.Create(context.Background(), tenantA, validCreateInput())
 	assertCode(t, err, apperrors.CodeValidationFailed, "Create() without tenant currency")
@@ -244,7 +247,7 @@ func TestCreateRejectsUnsupportedStoredCurrency(t *testing.T) {
 	// validates — but a value that somehow became unsupported must not silently
 	// denominate a real price.
 	services := newFakeServiceRepository()
-	catalog := NewCatalogService(services, tenantWithCurrency("JPY"))
+	catalog := NewCatalogService(services, tenantWithCurrency("JPY"), nil)
 
 	_, err := catalog.Create(context.Background(), tenantA, validCreateInput())
 	assertCode(t, err, apperrors.CodeValidationFailed, "Create() with an unsupported stored currency")
@@ -270,7 +273,7 @@ func TestCreateRejectsInvalidFieldsBeforeTouchingPersistence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			services := newFakeServiceRepository()
 			tenants := tenantWithCurrency("NGN")
-			catalog := NewCatalogService(services, tenants)
+			catalog := NewCatalogService(services, tenants, nil)
 
 			_, err := catalog.Create(context.Background(), tenantA, test.input)
 			assertCode(t, err, apperrors.CodeValidationFailed, "Create("+test.name+")")
@@ -286,7 +289,7 @@ func TestCreateRejectsInvalidFieldsBeforeTouchingPersistence(t *testing.T) {
 
 func TestCreateRejectsMalformedTenantID(t *testing.T) {
 	services := newFakeServiceRepository()
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	_, err := catalog.Create(context.Background(), "not-a-uuid", validCreateInput())
 	assertCode(t, err, apperrors.CodeInvalidRequest, "Create(malformed tenant id)")
@@ -298,7 +301,7 @@ func TestCreateRejectsMalformedTenantID(t *testing.T) {
 func TestCreatePropagatesRepositoryFailure(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.createErr = errors.New("connection reset")
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	_, err := catalog.Create(context.Background(), tenantA, validCreateInput())
 	if err == nil {
@@ -320,7 +323,7 @@ func TestCreatePropagatesRepositoryFailure(t *testing.T) {
 func TestGetScopesLookupToTheTenant(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	found, err := catalog.Get(context.Background(), tenantA, serviceID)
 	if err != nil {
@@ -337,7 +340,7 @@ func TestGetScopesLookupToTheTenant(t *testing.T) {
 func TestGetTreatsAnotherTenantsServiceAsNotFound(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	// Tenant B asks for a service ID that genuinely exists, under tenant A.
 	_, err := catalog.Get(context.Background(), tenantB, serviceID)
@@ -345,7 +348,7 @@ func TestGetTreatsAnotherTenantsServiceAsNotFound(t *testing.T) {
 }
 
 func TestGetRejectsMalformedIdentifiers(t *testing.T) {
-	catalog := NewCatalogService(newFakeServiceRepository(), tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(newFakeServiceRepository(), tenantWithCurrency("NGN"), nil)
 
 	if _, err := catalog.Get(context.Background(), "not-a-uuid", serviceID); err == nil {
 		t.Fatal("Get() accepted a malformed tenant id")
@@ -363,7 +366,7 @@ func TestGetRejectsMalformedIdentifiers(t *testing.T) {
 
 func TestListDefaultsToActiveOnly(t *testing.T) {
 	services := newFakeServiceRepository()
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	if _, err := catalog.List(context.Background(), tenantA, ""); err != nil {
 		t.Fatalf("List() error = %v", err)
@@ -387,7 +390,7 @@ func TestListStatusFilters(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.raw, func(t *testing.T) {
 			services := newFakeServiceRepository()
-			catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+			catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 			if _, err := catalog.List(context.Background(), tenantA, test.raw); err != nil {
 				t.Fatalf("List(%q) error = %v", test.raw, err)
@@ -407,7 +410,7 @@ func TestListStatusFilters(t *testing.T) {
 
 func TestListRejectsUnknownStatusFilter(t *testing.T) {
 	// A typo must surface rather than silently return the default catalog.
-	catalog := NewCatalogService(newFakeServiceRepository(), tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(newFakeServiceRepository(), tenantWithCurrency("NGN"), nil)
 
 	_, err := catalog.List(context.Background(), tenantA, "active")
 	assertCode(t, err, apperrors.CodeValidationFailed, "List(unknown filter)")
@@ -417,7 +420,7 @@ func TestListIsScopedToTheTenant(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services["a"] = &model.Service{ID: "a", TenantID: tenantA, Name: "A", Status: model.StatusActive}
 	services.services["b"] = &model.Service{ID: "b", TenantID: tenantB, Name: "B", Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	result, err := catalog.List(context.Background(), tenantA, "")
 	if err != nil {
@@ -433,7 +436,7 @@ func TestListIsScopedToTheTenant(t *testing.T) {
 func TestUpdateAppliesOnlySuppliedFields(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", DurationMinutes: 45, PriceMinor: 1999, Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	name := "  Gel Manicure Deluxe  "
 	updated, err := catalog.Update(context.Background(), tenantA, serviceID, UpdateServiceInput{Name: &name})
@@ -454,7 +457,7 @@ func TestUpdateAppliesOnlySuppliedFields(t *testing.T) {
 func TestUpdateRejectsAnEmptyPatch(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	_, err := catalog.Update(context.Background(), tenantA, serviceID, UpdateServiceInput{})
 	assertCode(t, err, apperrors.CodeValidationFailed, "Update(empty patch)")
@@ -481,7 +484,7 @@ func TestUpdateValidatesEachSuppliedField(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			services := newFakeServiceRepository()
 			services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
-			catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+			catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 			_, err := catalog.Update(context.Background(), tenantA, serviceID, test.input)
 			assertCode(t, err, apperrors.CodeValidationFailed, "Update("+test.name+")")
@@ -496,7 +499,7 @@ func TestUpdatingPriceRequiresTenantCurrency(t *testing.T) {
 	// An edit must not be able to bypass a check a creation could not.
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", PriceMinor: 1999, Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithoutCurrency())
+	catalog := NewCatalogService(services, tenantWithoutCurrency(), nil)
 
 	price := int64(2999)
 	_, err := catalog.Update(context.Background(), tenantA, serviceID, UpdateServiceInput{PriceMinor: &price})
@@ -512,7 +515,7 @@ func TestUpdateWithoutPriceDoesNotRequireCurrency(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
 	tenants := tenantWithoutCurrency()
-	catalog := NewCatalogService(services, tenants)
+	catalog := NewCatalogService(services, tenants, nil)
 
 	name := "Classic Manicure"
 	if _, err := catalog.Update(context.Background(), tenantA, serviceID, UpdateServiceInput{Name: &name}); err != nil {
@@ -526,7 +529,7 @@ func TestUpdateWithoutPriceDoesNotRequireCurrency(t *testing.T) {
 func TestUpdateTreatsAnotherTenantsServiceAsNotFound(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	name := "Hijacked"
 	_, err := catalog.Update(context.Background(), tenantB, serviceID, UpdateServiceInput{Name: &name})
@@ -541,7 +544,7 @@ func TestUpdateTreatsAnotherTenantsServiceAsNotFound(t *testing.T) {
 func TestArchiveMovesActiveServiceToArchived(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	archived, err := catalog.Archive(context.Background(), tenantA, serviceID)
 	if err != nil {
@@ -562,7 +565,7 @@ func TestArchiveMovesActiveServiceToArchived(t *testing.T) {
 func TestArchiveIsIdempotentAndDoesNotRewriteAnArchivedService(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusArchived}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	archived, err := catalog.Archive(context.Background(), tenantA, serviceID)
 	if err != nil {
@@ -579,7 +582,7 @@ func TestArchiveIsIdempotentAndDoesNotRewriteAnArchivedService(t *testing.T) {
 func TestArchiveTreatsAnotherTenantsServiceAsNotFound(t *testing.T) {
 	services := newFakeServiceRepository()
 	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
-	catalog := NewCatalogService(services, tenantWithCurrency("NGN"))
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), nil)
 
 	_, err := catalog.Archive(context.Background(), tenantB, serviceID)
 	assertCode(t, err, apperrors.CodeServiceNotFound, "Archive(cross-tenant)")
@@ -588,6 +591,144 @@ func TestArchiveTreatsAnotherTenantsServiceAsNotFound(t *testing.T) {
 	}
 	if services.archiveCalls != 0 {
 		t.Fatal("Archive() reached the repository write path on a cross-tenant request")
+	}
+}
+
+// --- Category assignment (SC1) ------------------------------------------
+
+func TestCreateAssignsAValidatedCategory(t *testing.T) {
+	services := newFakeServiceRepository()
+	categories := newFakeCategoryRepository()
+	categories.categories[categoryID] = &model.ServiceCategory{ID: categoryID, TenantID: tenantA, Name: "Pedicures", Status: model.StatusActive}
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), categories)
+
+	input := validCreateInput()
+	input.CategoryID = &categoryID
+	created, err := catalog.Create(context.Background(), tenantA, input)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.CategoryID == nil || *created.CategoryID != categoryID {
+		t.Fatalf("CategoryID = %v, want %q", created.CategoryID, categoryID)
+	}
+	if categories.lastTenantID != tenantA {
+		t.Fatalf("category lookup was scoped to %q, want %q", categories.lastTenantID, tenantA)
+	}
+}
+
+func TestCreateWithoutCategoryLeavesServiceUncategorised(t *testing.T) {
+	services := newFakeServiceRepository()
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), newFakeCategoryRepository())
+
+	created, err := catalog.Create(context.Background(), tenantA, validCreateInput())
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if created.CategoryID != nil {
+		t.Fatalf("CategoryID = %v, want nil when never supplied", *created.CategoryID)
+	}
+}
+
+// Cross-tenant category assignment must fail without leaking existence: a
+// category that genuinely exists, just under a different tenant, is refused
+// with the identical error a wholly nonexistent id would produce.
+func TestCreateRejectsCategoryBelongingToAnotherTenant(t *testing.T) {
+	services := newFakeServiceRepository()
+	categories := newFakeCategoryRepository()
+	categories.categories[categoryID] = &model.ServiceCategory{ID: categoryID, TenantID: tenantB, Name: "Pedicures", Status: model.StatusActive}
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), categories)
+
+	input := validCreateInput()
+	input.CategoryID = &categoryID
+	_, err := catalog.Create(context.Background(), tenantA, input)
+	assertCode(t, err, apperrors.CodeValidationFailed, "Create(foreign category)")
+	if services.createCalls != 0 {
+		t.Fatal("Create() reached the repository with an unvalidated cross-tenant category")
+	}
+
+	// A wholly nonexistent id must produce the same code and could not be
+	// distinguished from the foreign-tenant case above by a caller.
+	unknown := "550e8400-e29b-41d4-a716-446655449999"
+	input.CategoryID = &unknown
+	_, err = catalog.Create(context.Background(), tenantA, input)
+	assertCode(t, err, apperrors.CodeValidationFailed, "Create(unknown category)")
+}
+
+func TestCreateRejectsMalformedCategoryID(t *testing.T) {
+	services := newFakeServiceRepository()
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), newFakeCategoryRepository())
+
+	malformed := "not-a-uuid"
+	input := validCreateInput()
+	input.CategoryID = &malformed
+	_, err := catalog.Create(context.Background(), tenantA, input)
+	assertCode(t, err, apperrors.CodeValidationFailed, "Create(malformed category id)")
+	if services.createCalls != 0 {
+		t.Fatal("Create() reached the repository with a malformed category id")
+	}
+}
+
+// stringPtrPtr is a small helper for expressing the **string tri-state inline
+// in table-driven tests below.
+func stringPtrPtr(value *string) **string { return &value }
+
+func TestUpdateCategoryOmittedLeavesItUnchanged(t *testing.T) {
+	services := newFakeServiceRepository()
+	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive, CategoryID: &categoryID}
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), newFakeCategoryRepository())
+
+	name := "Renamed"
+	updated, err := catalog.Update(context.Background(), tenantA, serviceID, UpdateServiceInput{Name: &name})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.CategoryID == nil || *updated.CategoryID != categoryID {
+		t.Fatalf("CategoryID = %v, want unchanged %q", updated.CategoryID, categoryID)
+	}
+}
+
+func TestUpdateCategoryExplicitNullClearsIt(t *testing.T) {
+	services := newFakeServiceRepository()
+	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive, CategoryID: &categoryID}
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), newFakeCategoryRepository())
+
+	var cleared *string
+	updated, err := catalog.Update(context.Background(), tenantA, serviceID, UpdateServiceInput{CategoryID: stringPtrPtr(cleared)})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.CategoryID != nil {
+		t.Fatalf("CategoryID = %v, want cleared to nil", *updated.CategoryID)
+	}
+}
+
+func TestUpdateCategoryValueAssignsIt(t *testing.T) {
+	services := newFakeServiceRepository()
+	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
+	categories := newFakeCategoryRepository()
+	categories.categories[categoryID] = &model.ServiceCategory{ID: categoryID, TenantID: tenantA, Name: "Pedicures", Status: model.StatusActive}
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), categories)
+
+	updated, err := catalog.Update(context.Background(), tenantA, serviceID, UpdateServiceInput{CategoryID: stringPtrPtr(&categoryID)})
+	if err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+	if updated.CategoryID == nil || *updated.CategoryID != categoryID {
+		t.Fatalf("CategoryID = %v, want %q", updated.CategoryID, categoryID)
+	}
+}
+
+func TestUpdateRejectsCategoryBelongingToAnotherTenant(t *testing.T) {
+	services := newFakeServiceRepository()
+	services.services[serviceID] = &model.Service{ID: serviceID, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
+	categories := newFakeCategoryRepository()
+	categories.categories[categoryID] = &model.ServiceCategory{ID: categoryID, TenantID: tenantB, Name: "Pedicures", Status: model.StatusActive}
+	catalog := NewCatalogService(services, tenantWithCurrency("NGN"), categories)
+
+	_, err := catalog.Update(context.Background(), tenantA, serviceID, UpdateServiceInput{CategoryID: stringPtrPtr(&categoryID)})
+	assertCode(t, err, apperrors.CodeValidationFailed, "Update(foreign category)")
+	if services.updateCalls != 0 {
+		t.Fatal("Update() reached the repository with an unvalidated cross-tenant category")
 	}
 }
 

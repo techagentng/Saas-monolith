@@ -64,9 +64,15 @@ type Service struct {
 	Description     *string
 	DurationMinutes int
 	PriceMinor      int64
-	Status          Status
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	// CategoryID is nil for an uncategorised service — the permanent state of
+	// every service created before SC1, and a legitimate ongoing one for a
+	// tenant that never files its catalogue. The composite foreign key in
+	// migration 000019 guarantees that a non-nil value names a category
+	// belonging to THIS tenant.
+	CategoryID *string
+	Status     Status
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 // ValidateName trims and bounds a service name, returning the value to store.

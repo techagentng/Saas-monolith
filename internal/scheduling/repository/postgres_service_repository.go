@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
 	"github.com/techagentng/saas-monolith/internal/scheduling/model"
 )
@@ -29,7 +30,7 @@ func NewPostgresServiceRepository(db dbtx) *PostgresServiceRepository {
 // serviceColumns is the full column set every SELECT below reads, kept as one
 // constant so the query strings and scanService's argument order cannot
 // silently drift apart.
-const serviceColumns = "id, tenant_id, name, description, duration_minutes, price_minor, status, created_at, updated_at"
+const serviceColumns = "id, tenant_id, name, description, duration_minutes, price_minor, category_id, status, created_at, updated_at"
 
 // scanner is satisfied by both *sql.Row and *sql.Rows, letting the single-row
 // and multi-row paths share one scan routine.
@@ -41,7 +42,7 @@ func scanService(row scanner) (*model.Service, error) {
 	var service model.Service
 	err := row.Scan(
 		&service.ID, &service.TenantID, &service.Name, &service.Description,
-		&service.DurationMinutes, &service.PriceMinor, &service.Status,
+		&service.DurationMinutes, &service.PriceMinor, &service.CategoryID, &service.Status,
 		&service.CreatedAt, &service.UpdatedAt,
 	)
 	if err != nil {
@@ -56,6 +57,20 @@ func scanService(row scanner) (*model.Service, error) {
 // of another tenant's catalog rows.
 func notFound(cause error) error {
 	return apperrors.New(apperrors.CodeServiceNotFound, "service not found", cause)
+}
+
+// isForeignCategoryViolation recognizes a category_id that does not name a
+// category belonging to this service's own tenant — the composite foreign key
+// services_category_tenant_fkey (migration 000019) is what actually rejects
+// it. CatalogService validates the category against the tenant before ever
+// reaching here, so hitting this is a race (the category was reassigned or
+// archived — no, deleted is impossible while referenced — between that check
+// and this write) rather than routine bad input; it is still reported as a
+// presentable validation failure rather than a 500, the same defense-in-depth
+// treatment isMissingUserViolation gives staff_profiles.user_id.
+func isForeignCategoryViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23503" && pgErr.ConstraintName == "services_category_tenant_fkey"
 }
 
 // Create persists a new service. Status is defaulted here the same way
@@ -75,14 +90,17 @@ func (r *PostgresServiceRepository) Create(ctx context.Context, service *model.S
 	}
 	created := *service
 	created.Status = status
-	const query = `INSERT INTO services (id, tenant_id, name, description, duration_minutes, price_minor, status)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+	const query = `INSERT INTO services (id, tenant_id, name, description, duration_minutes, price_minor, category_id, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING status, created_at, updated_at`
 	err := r.db.QueryRowContext(ctx, query,
 		service.ID, service.TenantID, service.Name, service.Description,
-		service.DurationMinutes, service.PriceMinor, status,
+		service.DurationMinutes, service.PriceMinor, service.CategoryID, status,
 	).Scan(&created.Status, &created.CreatedAt, &created.UpdatedAt)
 	if err != nil {
+		if isForeignCategoryViolation(err) {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "service category does not belong to this tenant", err)
+		}
 		return nil, fmt.Errorf("inserting service: %w", err)
 	}
 	return &created, nil
@@ -157,6 +175,11 @@ func (r *PostgresServiceRepository) Update(ctx context.Context, tenantID string,
 		args = append(args, *update.DurationMinutes)
 		argIndex++
 	}
+	if update.CategoryID != nil {
+		sets = append(sets, fmt.Sprintf("category_id = $%d", argIndex))
+		args = append(args, *update.CategoryID)
+		argIndex++
+	}
 	if update.PriceMinor != nil {
 		sets = append(sets, fmt.Sprintf("price_minor = $%d", argIndex))
 		args = append(args, *update.PriceMinor)
@@ -182,6 +205,9 @@ func (r *PostgresServiceRepository) Update(ctx context.Context, tenantID string,
 		return nil, notFound(err)
 	}
 	if err != nil {
+		if isForeignCategoryViolation(err) {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "service category does not belong to this tenant", err)
+		}
 		return nil, fmt.Errorf("updating service: %w", err)
 	}
 	return service, nil

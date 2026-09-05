@@ -19,11 +19,17 @@ type ServiceUpdate struct {
 	Description     *string
 	DurationMinutes *int
 	PriceMinor      *int64
+	// CategoryID is a pointer-to-pointer: nil means "leave the field alone",
+	// a non-nil pointer to nil means "clear it to uncategorised", and a
+	// non-nil pointer to a non-nil string means "file it under this category".
+	// A plain *string could express "set" and "leave alone" but never
+	// "clear" — the same reason ServiceUpdate as a whole is all pointers.
+	CategoryID **string
 }
 
 // IsEmpty reports whether no field is set for update.
 func (u *ServiceUpdate) IsEmpty() bool {
-	return u.Name == nil && u.Description == nil && u.DurationMinutes == nil && u.PriceMinor == nil
+	return u.Name == nil && u.Description == nil && u.DurationMinutes == nil && u.PriceMinor == nil && u.CategoryID == nil
 }
 
 // ServiceListFilter narrows a catalog listing.
