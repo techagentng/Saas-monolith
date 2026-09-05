@@ -212,8 +212,10 @@ func TestPublicServiceViewExposesOnlyCustomerSafeFields(t *testing.T) {
 	// Category is sanctioned (SC1): it carries the category's Name only, never
 	// CategoryID — an internal identifier with no meaning to a customer, the
 	// same reasoning that already keeps status, tenant id, and timestamps off
-	// this DTO.
-	want := map[string]bool{"ID": true, "Name": true, "Description": true, "DurationMinutes": true, "PriceMinor": true, "Category": true}
+	// this DTO. Images is likewise sanctioned (Service Images): each entry is
+	// PublicServiceImageView, which itself carries no storage_key/tenant_id/
+	// service_id — see TestPublicServiceImageViewExposesOnlyCustomerSafeFields.
+	want := map[string]bool{"ID": true, "Name": true, "Description": true, "DurationMinutes": true, "PriceMinor": true, "Category": true, "Images": true}
 	structType := reflect.TypeOf(PublicServiceView{})
 	if structType.NumField() != len(want) {
 		t.Fatalf("PublicServiceView has %d fields, want %d", structType.NumField(), len(want))
@@ -229,12 +231,12 @@ func TestPublicServiceViewExposesOnlyCustomerSafeFields(t *testing.T) {
 
 func newCatalogFixture(resolver *fakePublicTenantResolver) (*fakeServiceRepository, PublicCatalogService) {
 	services := newFakeServiceRepository()
-	return services, NewPublicCatalogService(resolver, services, nil)
+	return services, NewPublicCatalogService(resolver, services, nil, newFakeServiceImageRepository())
 }
 
 func newCatalogFixtureWith(t *testing.T, resolver *fakePublicTenantResolver, seed func(*fakeServiceRepository)) (*fakeServiceRepository, PublicCatalogService) {
 	t.Helper()
 	services := newFakeServiceRepository()
 	seed(services)
-	return services, NewPublicCatalogService(resolver, services, nil)
+	return services, NewPublicCatalogService(resolver, services, nil, newFakeServiceImageRepository())
 }

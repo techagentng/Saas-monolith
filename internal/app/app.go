@@ -18,6 +18,7 @@ import (
 	identityhandler "github.com/techagentng/saas-monolith/internal/identity/handler"
 	identityrepository "github.com/techagentng/saas-monolith/internal/identity/repository"
 	identityservice "github.com/techagentng/saas-monolith/internal/identity/service"
+	"github.com/techagentng/saas-monolith/internal/media"
 	schedulinghandler "github.com/techagentng/saas-monolith/internal/scheduling/handler"
 	schedulingrepository "github.com/techagentng/saas-monolith/internal/scheduling/repository"
 	schedulingservice "github.com/techagentng/saas-monolith/internal/scheduling/service"
@@ -87,6 +88,18 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	suggestionService := schedulingservice.NewSuggestionService(tenants)
 	suggestionHandler := schedulinghandler.NewSuggestionHandler(suggestionService)
 
+	// Service Images: per-service uploaded photos. Storage is behind the
+	// internal/media.MediaStorage interface so the scheduling module never
+	// depends on a specific vendor; "local" is the only driver today (see
+	// config.MediaStorageDriver), serving files back out through the plain
+	// static route registered below. ServiceImageService is handed the
+	// service repository through its own narrow ServiceReader interface, the
+	// same interface-segregation reasoning CategoryReader already uses.
+	mediaStorage := media.NewLocalFilesystemStorage(cfg.MediaLocalDir, cfg.MediaPublicBaseURL)
+	imageRepository := schedulingrepository.NewPostgresServiceImageRepository(db)
+	imageService := schedulingservice.NewServiceImageService(db, imageRepository, serviceRepository, mediaStorage)
+	imageHandler := schedulinghandler.NewServiceImageHandler(imageService)
+
 	// Scheduling S3: bookable staff and the services each of them performs. The
 	// module validates a profile's optional user link against tenant membership,
 	// so it is handed the membership repository through its own narrow
@@ -151,7 +164,7 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// NAIL_TECHNICIAN vertical, and exposes only customer-safe service fields
 	// (no status, no timestamps, no tenant id). Public availability is S9;
 	// booking creation is S10.
-	publicCatalogService := schedulingservice.NewPublicCatalogService(publicTenantService, serviceRepository, categoryRepository)
+	publicCatalogService := schedulingservice.NewPublicCatalogService(publicTenantService, serviceRepository, categoryRepository, imageRepository)
 	publicServiceHandler := schedulinghandler.NewPublicServiceHandler(publicCatalogService)
 
 	// Scheduling S9: the anonymous public availability flow — steps 2 and 3 of
@@ -275,6 +288,22 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	api.HandleFunc("POST /api/v1/public/tenants/{slug}/bookings", func(writer http.ResponseWriter, request *http.Request) {
 		publicBookingHandler.Create(writer, request, request.PathValue("slug"))
 	})
+
+	// Service image files. Genuinely anonymous, like every other route in
+	// this block: a public_url stored on a service_images row and rendered
+	// on the public booking page must be directly fetchable by a customer's
+	// browser with no Authorization header. http.Dir/http.FileServer already
+	// refuse a path that would escape MediaLocalDir, and nothing here ever
+	// serves a bare directory listing of it (no index navigation is wired —
+	// only exact, previously-uploaded keys resolve to anything).
+	//
+	// Registered on this pre-auth-middleware mux for the identical reason
+	// every other public route is: it must never be wrapped in a private
+	// chain by accident. The "local" driver is today's only
+	// internal/media.MediaStorage implementation (see config.MediaStorageDriver);
+	// a future object-storage driver would make this route unnecessary — the
+	// stored public_url would point straight at the provider's own CDN.
+	api.Handle("GET /media/", http.StripPrefix("/media/", http.FileServer(http.Dir(cfg.MediaLocalDir))))
 
 	authMiddleware := auth.Middleware{Tokens: tokens, Sessions: sessions}
 	tenantMiddleware := tenant.Middleware{Resolver: contextService}
@@ -462,6 +491,58 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.read"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				suggestionHandler.List(writer, request, request.PathValue("tenantID"))
+			}),
+		),
+	)))
+
+	// Service Images. Reuses service.read (list) / service.update (every
+	// write) rather than a new permission family — the same reasoning
+	// service-categories and service-suggestions already establish.
+	//
+	// Route authorization matrix:
+	//   POST   /api/v1/tenants/{tenantID}/services/{serviceID}/images         TENANT  service.update
+	//   GET    /api/v1/tenants/{tenantID}/services/{serviceID}/images         TENANT  service.read
+	//   PATCH  /api/v1/tenants/{tenantID}/services/{serviceID}/images/{id}    TENANT  service.update
+	//   DELETE /api/v1/tenants/{tenantID}/services/{serviceID}/images/{id}    TENANT  service.update
+	//   PUT    /api/v1/tenants/{tenantID}/services/{serviceID}/images/order   TENANT  service.update
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	api.Handle("POST /api/v1/tenants/{tenantID}/services/{serviceID}/images", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				imageHandler.Create(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+	api.Handle("GET /api/v1/tenants/{tenantID}/services/{serviceID}/images", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				imageHandler.List(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+	// Registered before the {imageID} PATCH/DELETE routes only in source
+	// order for readability — Go 1.22's ServeMux resolves "order" by
+	// most-specific literal segment, not registration order, so
+	// "images/order" always wins over "images/{imageID}" regardless of which
+	// is registered first.
+	api.Handle("PUT /api/v1/tenants/{tenantID}/services/{serviceID}/images/order", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				imageHandler.ReplaceOrder(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+	api.Handle("PATCH /api/v1/tenants/{tenantID}/services/{serviceID}/images/{imageID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				imageHandler.Update(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"), request.PathValue("imageID"))
+			}),
+		),
+	)))
+	api.Handle("DELETE /api/v1/tenants/{tenantID}/services/{serviceID}/images/{imageID}", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "service.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				imageHandler.Delete(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"), request.PathValue("imageID"))
 			}),
 		),
 	)))

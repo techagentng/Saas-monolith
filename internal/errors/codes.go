@@ -17,6 +17,7 @@ const (
 	CodeServiceNotFound               ErrorCode = "SERVICE_NOT_FOUND"
 	CodeStaffNotFound                 ErrorCode = "STAFF_NOT_FOUND"
 	CodeCategoryNotFound              ErrorCode = "CATEGORY_NOT_FOUND"
+	CodeImageNotFound                 ErrorCode = "IMAGE_NOT_FOUND"
 	CodeTenantSlugTaken               ErrorCode = "TENANT_SLUG_TAKEN"
 	CodeTenantSlugInvalid             ErrorCode = "TENANT_SLUG_INVALID"
 	CodeUserAlreadyExists             ErrorCode = "USER_ALREADY_EXISTS"

@@ -48,10 +48,11 @@ var bmIntegrationMigrations = []string{
 	"000017_seed_booking_permissions.up.sql",
 	"000018_add_booking_status_index.up.sql",
 	"000019_create_service_categories.up.sql",
+	"000020_create_service_images.up.sql",
 }
 
 var bmIntegrationTables = []string{
-	"bookings", "staff_working_hours", "staff_services", "staff_profiles", "services", "service_categories",
+	"bookings", "staff_working_hours", "staff_services", "staff_profiles", "services", "service_categories", "service_images",
 	"user_roles", "role_permissions", "permissions", "roles",
 	"tenant_memberships", "sessions", "tenants", "users",
 }

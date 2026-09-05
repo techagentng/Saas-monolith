@@ -35,6 +35,21 @@ type PublicCatalogItem struct {
 	// identifier with no meaning to an anonymous customer, the same reasoning
 	// that already keeps tenant_id and status off this DTO.
 	Category *string `json:"category"`
+	// Images is this service's uploaded photos, in display order — [] for a
+	// service with none (every service that predates this feature, and any
+	// service today that simply has no photos yet), never null.
+	Images []PublicCatalogImage `json:"images"`
+}
+
+// PublicCatalogImage is the wire representation of one customer-facing
+// service image. No storage_key, no tenant_id, no service_id, no
+// timestamps — a browser needs exactly enough to render one <img> tag.
+type PublicCatalogImage struct {
+	ID        string  `json:"id"`
+	URL       string  `json:"url"`
+	AltText   *string `json:"alt_text"`
+	SortOrder int     `json:"sort_order"`
+	IsPrimary bool    `json:"is_primary"`
 }
 
 // PublicCatalogResponse is the whole payload: the currency prices are in
@@ -63,6 +78,13 @@ func (h *PublicServiceHandler) List(writer http.ResponseWriter, request *http.Re
 	// an ordinary, successful response the client renders as an empty state.
 	items := make([]PublicCatalogItem, len(catalog.Services))
 	for i, svc := range catalog.Services {
+		images := make([]PublicCatalogImage, len(svc.Images))
+		for j, image := range svc.Images {
+			images[j] = PublicCatalogImage{
+				ID: image.ID, URL: image.URL, AltText: image.AltText,
+				SortOrder: image.SortOrder, IsPrimary: image.IsPrimary,
+			}
+		}
 		items[i] = PublicCatalogItem{
 			ID:              svc.ID,
 			Name:            svc.Name,
@@ -70,6 +92,7 @@ func (h *PublicServiceHandler) List(writer http.ResponseWriter, request *http.Re
 			DurationMinutes: svc.DurationMinutes,
 			PriceMinor:      svc.PriceMinor,
 			Category:        svc.Category,
+			Images:          images,
 		}
 	}
 	writeJSON(writer, http.StatusOK, PublicCatalogResponse{Currency: catalog.Currency, Services: items})
