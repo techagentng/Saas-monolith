@@ -54,6 +54,7 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	}
 	authenticationHandler := identityhandler.NewAuthenticationHandler(authenticationService, refreshCookie)
 	userHandler := identityhandler.NewUserHandler(userService)
+	googleAuthHandler := newGoogleAuthHandler(ctx, cfg, db, users, authenticationService, refreshCookie)
 	membershipService := tenantservice.NewMembershipService(users, tenants, memberships)
 	contextService := tenantservice.NewTenantContextService(tenants, memberships)
 	membershipHandler := tenanthandler.NewMembershipHandler(membershipService)
@@ -221,6 +222,17 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	api.HandleFunc("GET /health", health)
 	api.HandleFunc("POST /api/v1/auth/login", authenticationHandler.Login)
 	api.HandleFunc("POST /api/v1/auth/refresh", authenticationHandler.Refresh)
+	// Sign in with Google (OAuth 2.0 / OpenID Connect). Both routes are
+	// anonymous and are registered here, before authMiddleware exists, for the
+	// same reason the public tenant route is: they are browser redirects, not
+	// API calls, and there is by definition no session yet to authenticate.
+	//
+	// The callback path is taken from config so the route this binary serves
+	// and the redirect URI configuration validates can never disagree - a
+	// mismatch would otherwise surface only as redirect_uri_mismatch on
+	// Google's own error page.
+	api.HandleFunc("GET /api/v1/auth/google", googleAuthHandler.Start)
+	api.HandleFunc("GET "+config.GoogleCallbackPath, googleAuthHandler.Callback)
 	api.HandleFunc("POST /api/v1/users", userHandler.Create)
 	// Public tenant identity (Feature 5): resolve a tenant by its public slug.
 	// This route is intentionally anonymous — no authentication, no tenant
@@ -651,4 +663,55 @@ func tenantContextHandler(resolver tenantservice.TenantContextService) http.Hand
 		writer.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(writer).Encode(trusted)
 	}))
+}
+
+// googleStateLifetime bounds how long an in-flight Google sign-in may take.
+// Ten minutes is generous for a consent screen and short enough that a
+// captured authorization URL is worthless within the hour.
+const googleStateLifetime = 10 * time.Minute
+
+// newGoogleAuthHandler assembles the Google OAuth flow, or a handler that
+// reports SERVICE_UNAVAILABLE when the deployment has no Google credentials.
+//
+// The disabled case is a working handler rather than an unregistered route so
+// a frontend whose Google button is visible gets a coherent, typed answer
+// instead of a 404 it would have to guess at. config.Load has already refused
+// to start on a partially configured deployment, so "enabled" here means all
+// four settings are present and well-formed.
+func newGoogleAuthHandler(
+	ctx context.Context,
+	cfg config.Config,
+	db *sql.DB,
+	users identityrepository.UserRepository,
+	authenticationService identityservice.AuthenticationService,
+	refreshCookie identityhandler.RefreshCookieConfig,
+) *identityhandler.GoogleAuthHandler {
+	state := identityhandler.OAuthStateConfig{
+		Secure: cfg.CookieSecure,
+		// See identityhandler.OAuthSameSite: Google's callback is a cross-site
+		// top-level navigation, which a Strict cookie would never accompany.
+		SameSite: identityhandler.OAuthSameSite(identityhandler.ParseSameSite(cfg.CookieSameSite)),
+		Lifetime: googleStateLifetime,
+	}
+	if !cfg.GoogleOAuthEnabled() {
+		return identityhandler.NewGoogleAuthHandler(nil, refreshCookie, state, cfg.FrontendURL, false)
+	}
+	googleService := identityservice.NewGoogleAuthenticationService(
+		identityservice.NewGoogleAuthorizationClient(identityservice.GoogleOAuthConfig{
+			ClientID:     cfg.GoogleClientID,
+			ClientSecret: cfg.GoogleClientSecret,
+			RedirectURL:  cfg.GoogleRedirectURL,
+		}),
+		// Constructing the verifier performs no network I/O; Google's signing
+		// keys are fetched lazily on the first callback and cached from then
+		// on, so startup never depends on Google being reachable.
+		identityservice.NewGoogleIDTokenVerifier(ctx, cfg.GoogleClientID),
+		users,
+		identityrepository.NewPostgresIdentityRepository(db),
+		identityrepository.NewPostgresIdentityTransactor(db),
+		// The existing authentication service issues the session, so a Google
+		// sign-in and a password sign-in produce the identical credential.
+		authenticationService,
+	)
+	return identityhandler.NewGoogleAuthHandler(googleService, refreshCookie, state, cfg.FrontendURL, true)
 }
