@@ -230,8 +230,15 @@ func TestDownMigrationRemovesOnlyTheS1Additions(t *testing.T) {
 	// the identical reason, added after this test was first written: bookings
 	// holds a composite foreign key into staff_profiles (and another into
 	// services), so rolling S1 back while bookings is still applied is
-	// equally not a legal database state.
+	// equally not a legal database state. Service Images' migration (000020)
+	// is included for the same reason again: service_images holds a
+	// composite foreign key into services, so it must be reversed before
+	// services itself can be dropped. 000019 (service_categories) is
+	// deliberately NOT included — services.category_id is the referencing
+	// side of that relationship, so dropping services is never blocked by
+	// service_categories still existing.
 	for _, migration := range []string{
+		"000020_create_service_images.down.sql",
 		"000018_add_booking_status_index.down.sql",
 		"000017_seed_booking_permissions.down.sql",
 		"000016_create_bookings.down.sql",

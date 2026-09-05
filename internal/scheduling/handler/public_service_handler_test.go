@@ -99,6 +99,55 @@ func TestPublicServiceListExposesCategoryNameNeverCategoryID(t *testing.T) {
 	}
 }
 
+// Service Images: the public catalogue exposes url/alt_text/sort_order/
+// is_primary and nothing else — no storage_key, no tenant_id, no service_id.
+// An existing service with no images returns images: [].
+func TestPublicServiceListExposesImagesWithNoStorageKey(t *testing.T) {
+	alt := "Finished gel set"
+	fake := &fakePublicCatalogService{result: &service.PublicCatalog{
+		Currency: strp("NGN"),
+		Services: []service.PublicServiceView{
+			{
+				ID: "s1", Name: "Gel Manicure", DurationMinutes: 45, PriceMinor: 1999,
+				Images: []service.PublicServiceImageView{
+					{ID: "img1", URL: "https://cdn.test.local/media/img1.jpg", AltText: &alt, SortOrder: 0, IsPrimary: true},
+				},
+			},
+			{ID: "s2", Name: "No-Photo Service", DurationMinutes: 30, PriceMinor: 999, Images: []service.PublicServiceImageView{}},
+		},
+	}}
+	handler := NewPublicServiceHandler(fake)
+	recorder := httptest.NewRecorder()
+
+	handler.List(recorder, httptest.NewRequest(http.MethodGet, "/", nil), "glamour-nails")
+
+	body := decodeBody(t, recorder)
+	services := body["services"].([]any)
+
+	withImage := services[0].(map[string]any)
+	images := withImage["images"].([]any)
+	if len(images) != 1 {
+		t.Fatalf("images = %v, want 1", images)
+	}
+	image := images[0].(map[string]any)
+	for _, key := range []string{"id", "url", "alt_text", "sort_order", "is_primary"} {
+		if _, ok := image[key]; !ok {
+			t.Fatalf("public image missing %q: %s", key, recorder.Body.String())
+		}
+	}
+	for _, forbidden := range []string{"storage_key", "tenant_id", "service_id", "created_at", "updated_at"} {
+		if _, present := image[forbidden]; present {
+			t.Fatalf("public image exposed internal field %q", forbidden)
+		}
+	}
+
+	// An existing service without images must continue to work.
+	withoutImage := services[1].(map[string]any)
+	if imgs, ok := withoutImage["images"].([]any); !ok || len(imgs) != 0 {
+		t.Fatalf("images for a photo-less service = %v, want []", withoutImage["images"])
+	}
+}
+
 func TestPublicServiceListSerializesAnEmptyCatalogAsEmptyArray(t *testing.T) {
 	fake := &fakePublicCatalogService{result: &service.PublicCatalog{Currency: strp("NGN"), Services: nil}}
 	handler := NewPublicServiceHandler(fake)

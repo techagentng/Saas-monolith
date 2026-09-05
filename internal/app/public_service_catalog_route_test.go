@@ -43,7 +43,7 @@ func nailTenant(id, slug string) *tenantmodel.Tenant {
 func buildPublicCatalogRoute(tenant *tenantmodel.Tenant, services map[string]*schedulingmodel.Service) (http.Handler, *statefulServiceRepository) {
 	tenantRepo := &publicSlugRepository{tenant: tenant}
 	serviceRepo := &statefulServiceRepository{services: services}
-	catalog := schedulingservice.NewPublicCatalogService(tenantservice.NewPublicTenantService(tenantRepo), serviceRepo, nil)
+	catalog := schedulingservice.NewPublicCatalogService(tenantservice.NewPublicTenantService(tenantRepo), serviceRepo, nil, newStatefulServiceImageRepository())
 	handler := schedulinghandler.NewPublicServiceHandler(catalog)
 
 	mux := http.NewServeMux()

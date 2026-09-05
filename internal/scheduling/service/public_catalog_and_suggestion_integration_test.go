@@ -71,7 +71,7 @@ func TestPublicCatalogResolvesCategoryNameAgainstRealPostgres(t *testing.T) {
 		TenantID: publicCatalogTenantID, Currency: &currency, BusinessType: &nailType,
 	}}
 
-	catalog := NewPublicCatalogService(resolver, serviceRepo, categoryRepo)
+	catalog := NewPublicCatalogService(resolver, serviceRepo, categoryRepo, repository.NewPostgresServiceImageRepository(db))
 	result, err := catalog.GetCatalog(ctx, "public-catalog-tenant")
 	if err != nil {
 		t.Fatalf("GetCatalog() error = %v", err)

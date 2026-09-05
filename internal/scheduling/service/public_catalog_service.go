@@ -41,6 +41,24 @@ type PublicServiceView struct {
 	// whose category row cannot be resolved (defensive: a missing category
 	// must degrade the display, never break the whole public catalog).
 	Category *string
+	// Images is this service's uploaded photos, in display order. Empty
+	// (never nil at the JSON boundary — see the handler's use of make with
+	// len) for a service with none, which is the permanent state of every
+	// service that predates this feature and a legitimate ongoing choice for
+	// any service today.
+	Images []PublicServiceImageView
+}
+
+// PublicServiceImageView is the customer-safe projection of one service
+// image. No storage_key, no tenant_id, no service_id, no timestamps — a
+// customer's browser needs exactly enough to render an <img> and nothing
+// that discloses how or where the file is actually stored.
+type PublicServiceImageView struct {
+	ID        string
+	URL       string
+	AltText   *string
+	SortOrder int
+	IsPrimary bool
 }
 
 // PublicCatalog is the whole public-catalog response: the bookable services
@@ -80,10 +98,11 @@ type publicCatalogService struct {
 	tenants    PublicTenantResolver
 	services   repository.ServiceRepository
 	categories repository.ServiceCategoryRepository
+	images     repository.ServiceImageRepository
 }
 
-func NewPublicCatalogService(tenants PublicTenantResolver, services repository.ServiceRepository, categories repository.ServiceCategoryRepository) PublicCatalogService {
-	return &publicCatalogService{tenants: tenants, services: services, categories: categories}
+func NewPublicCatalogService(tenants PublicTenantResolver, services repository.ServiceRepository, categories repository.ServiceCategoryRepository, images repository.ServiceImageRepository) PublicCatalogService {
+	return &publicCatalogService{tenants: tenants, services: services, categories: categories, images: images}
 }
 
 func (s *publicCatalogService) GetCatalog(ctx context.Context, slug string) (*PublicCatalog, error) {
@@ -132,6 +151,17 @@ func (s *publicCatalogService) GetCatalog(ctx context.Context, slug string) (*Pu
 		}
 	}
 
+	// Batched the same way category names are: one query for every service's
+	// images rather than one per service. Skipped entirely for an empty
+	// catalog, since there is nothing to resolve.
+	var imagesByService map[string][]*model.ServiceImage
+	if len(stored) > 0 {
+		imagesByService, err = s.imagesByServiceID(ctx, resolved.TenantID, stored)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	views := make([]PublicServiceView, 0, len(stored))
 	for _, svc := range stored {
 		var category *string
@@ -150,9 +180,41 @@ func (s *publicCatalogService) GetCatalog(ctx context.Context, slug string) (*Pu
 			DurationMinutes: svc.DurationMinutes,
 			PriceMinor:      svc.PriceMinor,
 			Category:        category,
+			Images:          toPublicServiceImageViews(imagesByService[svc.ID]),
 		})
 	}
 	return &PublicCatalog{Currency: resolved.Currency, Services: views}, nil
+}
+
+// imagesByServiceID loads every image for every service in stored, in one
+// query, keyed by ServiceID. ListByServiceIDs already returns each service's
+// own images pre-sorted in display order, so grouping here does not disturb
+// that order.
+func (s *publicCatalogService) imagesByServiceID(ctx context.Context, tenantID string, stored []*model.Service) (map[string][]*model.ServiceImage, error) {
+	serviceIDs := make([]string, len(stored))
+	for i, svc := range stored {
+		serviceIDs[i] = svc.ID
+	}
+	images, err := s.images.ListByServiceIDs(ctx, tenantID, serviceIDs)
+	if err != nil {
+		return nil, err
+	}
+	byService := make(map[string][]*model.ServiceImage, len(stored))
+	for _, image := range images {
+		byService[image.ServiceID] = append(byService[image.ServiceID], image)
+	}
+	return byService, nil
+}
+
+func toPublicServiceImageViews(images []*model.ServiceImage) []PublicServiceImageView {
+	views := make([]PublicServiceImageView, len(images))
+	for i, image := range images {
+		views[i] = PublicServiceImageView{
+			ID: image.ID, URL: image.PublicURL, AltText: image.AltText,
+			SortOrder: image.SortOrder, IsPrimary: image.IsPrimary,
+		}
+	}
+	return views
 }
 
 // hasCategorizedService reports whether any service in the listing carries a

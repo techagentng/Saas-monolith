@@ -60,6 +60,24 @@ type Config struct {
 	// path is resolved relative to it, which is what makes an open redirect
 	// structurally impossible (see identity/handler.SafeRedirectTarget).
 	FrontendURL string
+	// MediaStorageDriver selects the internal/media.MediaStorage
+	// implementation. Only "local" exists today; the field exists so adding a
+	// second driver (S3, Cloudinary, R2) is a config value, not a rebuild —
+	// see internal/media's own package doc for why the interface is shaped
+	// the way it is.
+	MediaStorageDriver string
+	// MediaLocalDir is the "local" driver's root directory, relative to the
+	// working directory unless given absolute. Never served directly by a
+	// third party — internal/app mounts it behind the API's own static route.
+	MediaLocalDir string
+	// MediaPublicBaseURL is the externally-reachable origin (+ optional path
+	// prefix) a stored key is appended to, with no trailing slash — e.g.
+	// "https://api.example.com/media". It has a same-origin, best-effort
+	// default in development (built from Host/Port); production must set it
+	// explicitly, because "the origin this process happens to bind to"
+	// (127.0.0.1 by default — see Host) is never a real browser-reachable
+	// address in production the way it can be for a local dev server.
+	MediaPublicBaseURL string
 }
 
 // GoogleOAuthEnabled reports whether Sign in with Google is configured. Load
@@ -112,6 +130,9 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, fmt.Errorf("COOKIE_SAMESITE=None requires COOKIE_SECURE=true")
 	}
 	if err := c.loadGoogleOAuth(lookup); err != nil {
+		return Config{}, err
+	}
+	if err := c.loadMedia(lookup, isProduction); err != nil {
 		return Config{}, err
 	}
 	privateValue := get(lookup, "ED25519_PRIVATE_KEY", "")
@@ -257,6 +278,32 @@ func (c *Config) loadGoogleOAuth(lookup func(string) (string, bool)) error {
 		}
 	}
 	return nil
+}
+
+// loadMedia reads the service-image storage settings. Unlike Google OAuth,
+// this feature is never optional — service images are a standing part of the
+// scheduling module — so every field always has a value: sensible defaults
+// for local development, with production required to state its own public
+// origin explicitly rather than inherit a meaningless one.
+func (c *Config) loadMedia(lookup func(string) (string, bool), isProduction bool) error {
+	c.MediaStorageDriver = get(lookup, "MEDIA_STORAGE_DRIVER", "local")
+	if c.MediaStorageDriver != "local" {
+		return fmt.Errorf("MEDIA_STORAGE_DRIVER %q is not supported (only \"local\" exists today)", c.MediaStorageDriver)
+	}
+	c.MediaLocalDir = get(lookup, "MEDIA_LOCAL_DIR", "uploads")
+
+	defaultPublicBaseURL := ""
+	if !isProduction {
+		// Reads c.Host/c.Port, not the raw env again: both are already parsed
+		// onto c by the time load() reaches this call, and re-deriving them
+		// here would be a second, driftable copy of PORT's own fallback logic.
+		defaultPublicBaseURL = fmt.Sprintf("http://%s:%d/media", c.Host, c.Port)
+	}
+	c.MediaPublicBaseURL = strings.TrimRight(get(lookup, "MEDIA_PUBLIC_BASE_URL", defaultPublicBaseURL), "/")
+	if c.MediaPublicBaseURL == "" {
+		return fmt.Errorf("MEDIA_PUBLIC_BASE_URL is required in production")
+	}
+	return requireAbsoluteURL("MEDIA_PUBLIC_BASE_URL", c.MediaPublicBaseURL)
 }
 
 // GoogleCallbackPath is the path segment of the OAuth callback route. It is
