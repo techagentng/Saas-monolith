@@ -18,7 +18,6 @@ import (
 	identityhandler "github.com/techagentng/saas-monolith/internal/identity/handler"
 	identityrepository "github.com/techagentng/saas-monolith/internal/identity/repository"
 	identityservice "github.com/techagentng/saas-monolith/internal/identity/service"
-	"github.com/techagentng/saas-monolith/internal/media"
 	schedulinghandler "github.com/techagentng/saas-monolith/internal/scheduling/handler"
 	schedulingrepository "github.com/techagentng/saas-monolith/internal/scheduling/repository"
 	schedulingservice "github.com/techagentng/saas-monolith/internal/scheduling/service"
@@ -90,12 +89,17 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 
 	// Service Images: per-service uploaded photos. Storage is behind the
 	// internal/media.MediaStorage interface so the scheduling module never
-	// depends on a specific vendor; "local" is the only driver today (see
-	// config.MediaStorageDriver), serving files back out through the plain
-	// static route registered below. ServiceImageService is handed the
-	// service repository through its own narrow ServiceReader interface, the
-	// same interface-segregation reasoning CategoryReader already uses.
-	mediaStorage := media.NewLocalFilesystemStorage(cfg.MediaLocalDir, cfg.MediaPublicBaseURL)
+	// depends on a specific vendor; the driver ("local" or "r2") is selected
+	// by config.MediaStorageDriver in newMediaStorage below. The "local"
+	// driver serves files back out through the plain static route registered
+	// further down; the "r2" driver's public_url points straight at
+	// Cloudflare's edge. ServiceImageService is handed the service repository
+	// through its own narrow ServiceReader interface, the same
+	// interface-segregation reasoning CategoryReader already uses.
+	mediaStorage, err := newMediaStorage(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
 	imageRepository := schedulingrepository.NewPostgresServiceImageRepository(db)
 	imageService := schedulingservice.NewServiceImageService(db, imageRepository, serviceRepository, mediaStorage)
 	imageHandler := schedulinghandler.NewServiceImageHandler(imageService)
@@ -299,11 +303,13 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	//
 	// Registered on this pre-auth-middleware mux for the identical reason
 	// every other public route is: it must never be wrapped in a private
-	// chain by accident. The "local" driver is today's only
-	// internal/media.MediaStorage implementation (see config.MediaStorageDriver);
-	// a future object-storage driver would make this route unnecessary — the
-	// stored public_url would point straight at the provider's own CDN.
-	api.Handle("GET /media/", http.StripPrefix("/media/", http.FileServer(http.Dir(cfg.MediaLocalDir))))
+	// chain by accident. Only the "local" driver serves bytes from this
+	// process; under the "r2" driver a stored public_url points straight at
+	// Cloudflare's edge and this route would never be hit, so it is not
+	// registered.
+	if cfg.MediaStorageDriver == "local" {
+		api.Handle("GET /media/", http.StripPrefix("/media/", http.FileServer(http.Dir(cfg.MediaLocalDir))))
+	}
 
 	authMiddleware := auth.Middleware{Tokens: tokens, Sessions: sessions}
 	tenantMiddleware := tenant.Middleware{Resolver: contextService}

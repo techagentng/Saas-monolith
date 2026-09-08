@@ -61,11 +61,28 @@ type Config struct {
 	// structurally impossible (see identity/handler.SafeRedirectTarget).
 	FrontendURL string
 	// MediaStorageDriver selects the internal/media.MediaStorage
-	// implementation. Only "local" exists today; the field exists so adding a
-	// second driver (S3, Cloudinary, R2) is a config value, not a rebuild —
-	// see internal/media's own package doc for why the interface is shaped
-	// the way it is.
+	// implementation. "local" and "r2" (Cloudflare R2, S3-compatible) exist
+	// today; the field exists so adding a further driver is a config value,
+	// not a rebuild — see internal/media's own package doc for why the
+	// interface is shaped the way it is.
 	MediaStorageDriver string
+	// MediaR2Bucket, MediaR2Endpoint, MediaR2Prefix, MediaR2AccessKeyID and
+	// MediaR2SecretAccessKey configure the "r2" driver. They are all required
+	// when MEDIA_STORAGE_DRIVER=r2 (except the prefix, which may be empty) —
+	// a half-configured R2 deployment fails at boot rather than per-request.
+	//
+	// MediaR2Endpoint is the S3 API endpoint the Go backend talks to
+	// (https://<account>.r2.cloudflarestorage.com); it must NOT include the
+	// bucket, which is supplied separately. It is never the browser-facing
+	// image origin — that is MediaPublicBaseURL.
+	//
+	// MediaR2SecretAccessKey and MediaR2AccessKeyID are never logged, never
+	// returned by any handler, and never placed in an error message.
+	MediaR2Bucket          string
+	MediaR2Endpoint        string
+	MediaR2Prefix          string
+	MediaR2AccessKeyID     string
+	MediaR2SecretAccessKey string
 	// MediaLocalDir is the "local" driver's root directory, relative to the
 	// working directory unless given absolute. Never served directly by a
 	// third party — internal/app mounts it behind the API's own static route.
@@ -287,10 +304,16 @@ func (c *Config) loadGoogleOAuth(lookup func(string) (string, bool)) error {
 // origin explicitly rather than inherit a meaningless one.
 func (c *Config) loadMedia(lookup func(string) (string, bool), isProduction bool) error {
 	c.MediaStorageDriver = get(lookup, "MEDIA_STORAGE_DRIVER", "local")
-	if c.MediaStorageDriver != "local" {
-		return fmt.Errorf("MEDIA_STORAGE_DRIVER %q is not supported (only \"local\" exists today)", c.MediaStorageDriver)
+	switch c.MediaStorageDriver {
+	case "local", "r2":
+	default:
+		return fmt.Errorf("MEDIA_STORAGE_DRIVER %q is not supported (\"local\" and \"r2\" exist)", c.MediaStorageDriver)
 	}
 	c.MediaLocalDir = get(lookup, "MEDIA_LOCAL_DIR", "uploads")
+
+	if c.MediaStorageDriver == "r2" {
+		return c.loadMediaR2(lookup)
+	}
 
 	defaultPublicBaseURL := ""
 	if !isProduction {
@@ -302,6 +325,40 @@ func (c *Config) loadMedia(lookup func(string) (string, bool), isProduction bool
 	c.MediaPublicBaseURL = strings.TrimRight(get(lookup, "MEDIA_PUBLIC_BASE_URL", defaultPublicBaseURL), "/")
 	if c.MediaPublicBaseURL == "" {
 		return fmt.Errorf("MEDIA_PUBLIC_BASE_URL is required in production")
+	}
+	return requireAbsoluteURL("MEDIA_PUBLIC_BASE_URL", c.MediaPublicBaseURL)
+}
+
+// loadMediaR2 reads and validates the Cloudflare R2 driver settings. The
+// driver fails closed: every field except the prefix is required in every
+// environment, because there is no meaningful default for "which bucket" or
+// "which endpoint" the way there is for the local driver's directory. The
+// access key id and secret are validated for presence only — they are never
+// echoed into an error.
+func (c *Config) loadMediaR2(lookup func(string) (string, bool)) error {
+	c.MediaR2Bucket = get(lookup, "MEDIA_R2_BUCKET", "")
+	c.MediaR2Endpoint = strings.TrimRight(get(lookup, "MEDIA_R2_ENDPOINT", ""), "/")
+	c.MediaR2Prefix = get(lookup, "MEDIA_R2_PREFIX", "")
+	c.MediaR2AccessKeyID = get(lookup, "MEDIA_R2_ACCESS_KEY_ID", "")
+	c.MediaR2SecretAccessKey = get(lookup, "MEDIA_R2_SECRET_ACCESS_KEY", "")
+
+	for key, value := range map[string]string{
+		"MEDIA_R2_BUCKET":            c.MediaR2Bucket,
+		"MEDIA_R2_ENDPOINT":          c.MediaR2Endpoint,
+		"MEDIA_R2_ACCESS_KEY_ID":     c.MediaR2AccessKeyID,
+		"MEDIA_R2_SECRET_ACCESS_KEY": c.MediaR2SecretAccessKey,
+	} {
+		if value == "" {
+			return fmt.Errorf("%s is required when MEDIA_STORAGE_DRIVER=r2", key)
+		}
+	}
+	if err := requireAbsoluteURL("MEDIA_R2_ENDPOINT", c.MediaR2Endpoint); err != nil {
+		return err
+	}
+
+	c.MediaPublicBaseURL = strings.TrimRight(get(lookup, "MEDIA_PUBLIC_BASE_URL", ""), "/")
+	if c.MediaPublicBaseURL == "" {
+		return fmt.Errorf("MEDIA_PUBLIC_BASE_URL is required when MEDIA_STORAGE_DRIVER=r2")
 	}
 	return requireAbsoluteURL("MEDIA_PUBLIC_BASE_URL", c.MediaPublicBaseURL)
 }
