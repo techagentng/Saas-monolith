@@ -169,6 +169,14 @@ func (r *PostgresBookingRepository) ListByTenant(ctx context.Context, tenantID s
 		args = append(args, *filter.ServiceID)
 		conditions = append(conditions, fmt.Sprintf("b.service_id = $%d", len(args)))
 	}
+	if filter.StartAtFrom != nil {
+		args = append(args, filter.StartAtFrom.UTC())
+		conditions = append(conditions, fmt.Sprintf("b.start_at >= $%d", len(args)))
+	}
+	if filter.StartAtTo != nil {
+		args = append(args, filter.StartAtTo.UTC())
+		conditions = append(conditions, fmt.Sprintf("b.start_at < $%d", len(args)))
+	}
 
 	query := bookingRelationSelect + "\n    WHERE " + strings.Join(conditions, " AND ") + "\n    ORDER BY b.start_at ASC, b.id ASC"
 	rows, err := r.db.QueryContext(ctx, query, args...)

@@ -118,6 +118,12 @@ func (r *statefulBookingRepository) ListByTenant(_ context.Context, tenantID str
 		if filter.ServiceID != nil && b.ServiceID != *filter.ServiceID {
 			continue
 		}
+		if filter.StartAtFrom != nil && b.StartAt.Before(*filter.StartAtFrom) {
+			continue
+		}
+		if filter.StartAtTo != nil && !b.StartAt.Before(*filter.StartAtTo) {
+			continue
+		}
 		out = append(out, r.withRelations(b))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Booking.StartAt.Before(out[j].Booking.StartAt) })

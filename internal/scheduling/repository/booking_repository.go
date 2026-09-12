@@ -49,6 +49,13 @@ type BookingListFilter struct {
 	// StaffID / ServiceID nil mean "any"; a concrete value restricts to it.
 	StaffID   *string
 	ServiceID *string
+	// StartAtFrom/StartAtTo (S11 date filter) are a half-open [from, to)
+	// range on start_at, both absolute instants already resolved from the
+	// caller's tenant-local calendar-date query through the tenant's own
+	// timezone — this repository never interprets a calendar date itself.
+	// Nil means no date restriction.
+	StartAtFrom *time.Time
+	StartAtTo   *time.Time
 }
 
 // BookingRepository is the persistence boundary for appointment bookings.

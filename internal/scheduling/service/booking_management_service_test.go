@@ -172,6 +172,61 @@ func TestListMapsRowsToSummariesWithReferenceAndPII(t *testing.T) {
 	}
 }
 
+// --- List: date filter (S11) -------------------------------------------
+
+// The date filter must mean the TENANT's calendar day, not the server's UTC
+// day. The fixture tenant is Africa/Lagos (UTC+1): "2026-09-07" there is
+// [2026-09-06 23:00 UTC, 2026-09-07 23:00 UTC), not [2026-09-07 00:00 UTC,
+// 2026-09-08 00:00 UTC) — a bug that used the latter would be invisible in a
+// UTC-only test.
+func TestListDateFilterResolvesTheTenantsCalendarDayNotTheServers(t *testing.T) {
+	store, _, svc := bmFixture(bmNow)
+	date := "2026-09-07"
+
+	if _, err := svc.List(context.Background(), tenantA, BookingListFilter{View: BookingViewAll, Date: &date}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+
+	f := store.lastFilter
+	if f.StartAtFrom == nil || f.StartAtTo == nil {
+		t.Fatalf("date filter did not populate a range: %+v", f)
+	}
+	wantFrom := time.Date(2026, 9, 6, 23, 0, 0, 0, time.UTC) // 2026-09-07 00:00 Africa/Lagos
+	wantTo := time.Date(2026, 9, 7, 23, 0, 0, 0, time.UTC)   // 2026-09-08 00:00 Africa/Lagos
+	if !f.StartAtFrom.Equal(wantFrom) || !f.StartAtTo.Equal(wantTo) {
+		t.Fatalf("range = [%s, %s), want [%s, %s)", f.StartAtFrom, f.StartAtTo, wantFrom, wantTo)
+	}
+}
+
+func TestListRejectsAMalformedDateFilter(t *testing.T) {
+	_, _, svc := bmFixture(bmNow)
+	bad := "07-09-2026"
+	_, err := svc.List(context.Background(), tenantA, BookingListFilter{View: BookingViewAll, Date: &bad})
+	assertCode(t, err, apperrors.CodeValidationFailed, "malformed date filter")
+}
+
+func TestListWithNoDateFilterLeavesTheRangeUnset(t *testing.T) {
+	store, _, svc := bmFixture(bmNow)
+	if _, err := svc.List(context.Background(), tenantA, BookingListFilter{View: BookingViewAll}); err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if f := store.lastFilter; f.StartAtFrom != nil || f.StartAtTo != nil {
+		t.Fatalf("range = [%v, %v), want unset when no date filter is given", f.StartAtFrom, f.StartAtTo)
+	}
+}
+
+func TestListDateFilterPropagatesATenantTimezoneLookupFailure(t *testing.T) {
+	store, tenants, svc := bmFixture(bmNow)
+	tenants.findErr = apperrors.New(apperrors.CodeTenantNotFound, "tenant not found", nil)
+	date := "2026-09-07"
+
+	_, err := svc.List(context.Background(), tenantA, BookingListFilter{View: BookingViewAll, Date: &date})
+	assertCode(t, err, apperrors.CodeTenantNotFound, "tenant lookup failure during date resolution")
+	if store.lastFilter.StartAtFrom != nil {
+		t.Fatal("a failed tenant lookup must not reach the repository with a half-built filter")
+	}
+}
+
 func TestListRejectsAMalformedStaffFilter(t *testing.T) {
 	_, _, svc := bmFixture(bmNow)
 	bad := "not-a-uuid"
