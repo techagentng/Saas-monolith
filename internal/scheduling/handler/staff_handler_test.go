@@ -34,6 +34,11 @@ type fakeStaffService struct {
 	list       []*model.StaffProfile
 	capability []string
 	err        error
+
+	// SC2: recorded input/result for the service-side mirror methods below.
+	serviceID    string
+	staffIDsIn   []string
+	staffIDsOut  []string
 }
 
 func (f *fakeStaffService) Create(_ context.Context, tenantID string, input service.CreateStaffInput) (*model.StaffProfile, error) {
@@ -69,6 +74,16 @@ func (f *fakeStaffService) ListCapabilities(_ context.Context, tenantID string, 
 func (f *fakeStaffService) ReplaceCapabilities(_ context.Context, tenantID string, staffID string, serviceIDs []string) ([]string, error) {
 	f.tenantID, f.staffID, f.serviceIDs = tenantID, staffID, serviceIDs
 	return f.capability, f.err
+}
+
+func (f *fakeStaffService) ListServiceStaff(_ context.Context, tenantID string, serviceID string) ([]string, error) {
+	f.tenantID, f.serviceID = tenantID, serviceID
+	return f.staffIDsOut, f.err
+}
+
+func (f *fakeStaffService) ReplaceServiceStaff(_ context.Context, tenantID string, serviceID string, staffIDs []string) ([]string, error) {
+	f.tenantID, f.serviceID, f.staffIDsIn = tenantID, serviceID, staffIDs
+	return f.staffIDsOut, f.err
 }
 
 func storedStaff() *model.StaffProfile {
@@ -398,6 +413,92 @@ func TestListCapabilitiesReturnsServiceIDsOnly(t *testing.T) {
 	for _, leaked := range []string{"name", "price_minor", "duration_minutes"} {
 		if _, present := response[leaked]; present {
 			t.Fatalf("capability response leaked catalog field %q", leaked)
+		}
+	}
+}
+
+// --- SC2: service-side staff assignment (ListCapabilities/ReplaceCapabilities
+// run the other way round) -----------------------------------------------
+
+// handlerServiceID is declared package-wide in service_handler_test.go.
+
+func TestReplaceServiceStaffPassesTheFullSetThrough(t *testing.T) {
+	staff := &fakeStaffService{staffIDsOut: []string{"aaa", "bbb"}}
+	handler := NewStaffHandler(staff)
+	recorder := httptest.NewRecorder()
+
+	handler.ReplaceServiceStaff(recorder, httptest.NewRequest(http.MethodPut, "/", strings.NewReader(`{"staff_ids":["aaa","bbb"]}`)), handlerTenantID, handlerServiceID)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", recorder.Code, recorder.Body.String())
+	}
+	if len(staff.staffIDsIn) != 2 || staff.staffIDsIn[0] != "aaa" {
+		t.Fatalf("staff ids = %v, want the full submitted set", staff.staffIDsIn)
+	}
+	if staff.serviceID != handlerServiceID {
+		t.Fatalf("serviceID passed through = %q, want %q", staff.serviceID, handlerServiceID)
+	}
+
+	var body ServiceStaff
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if len(body.StaffIDs) != 2 {
+		t.Fatalf("response staff_ids = %v, want the committed set", body.StaffIDs)
+	}
+}
+
+// An omitted or null staff_ids means "this service currently has no
+// technicians", which is a legitimate state (e.g. a newly created service)
+// rather than a malformed request.
+func TestReplaceServiceStaffTreatsAnAbsentSetAsEmpty(t *testing.T) {
+	staff := &fakeStaffService{staffIDsOut: []string{}}
+	handler := NewStaffHandler(staff)
+
+	for _, body := range []string{`{}`, `{"staff_ids":null}`, `{"staff_ids":[]}`} {
+		recorder := httptest.NewRecorder()
+		handler.ReplaceServiceStaff(recorder, httptest.NewRequest(http.MethodPut, "/", strings.NewReader(body)), handlerTenantID, handlerServiceID)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("body %s: status = %d, want 200", body, recorder.Code)
+		}
+		if len(staff.staffIDsIn) != 0 {
+			t.Fatalf("body %s: staff ids = %v, want an empty set", body, staff.staffIDsIn)
+		}
+	}
+}
+
+func TestReplaceServiceStaffRejectsMalformedJSON(t *testing.T) {
+	handler := NewStaffHandler(&fakeStaffService{})
+	recorder := httptest.NewRecorder()
+
+	handler.ReplaceServiceStaff(recorder, httptest.NewRequest(http.MethodPut, "/", strings.NewReader("{oops")), handlerTenantID, handlerServiceID)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", recorder.Code)
+	}
+	assertErrorCode(t, recorder, "INVALID_REQUEST")
+}
+
+func TestListServiceStaffReturnsStaffIDsOnly(t *testing.T) {
+	staff := &fakeStaffService{staffIDsOut: []string{"aaa"}}
+	handler := NewStaffHandler(staff)
+	recorder := httptest.NewRecorder()
+
+	handler.ListServiceStaff(recorder, httptest.NewRequest(http.MethodGet, "/", nil), handlerTenantID, handlerServiceID)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	response := decodeBody(t, recorder)
+	if _, present := response["staff_ids"]; !present {
+		t.Fatalf("response missing staff_ids: %s", recorder.Body.String())
+	}
+	// Staff profile fields are this handler's own List/Get to serve;
+	// duplicating them here would create a second copy that could disagree.
+	for _, leaked := range []string{"display_name", "bio", "is_bookable"} {
+		if _, present := response[leaked]; present {
+			t.Fatalf("service-staff response leaked staff profile field %q", leaked)
 		}
 	}
 }

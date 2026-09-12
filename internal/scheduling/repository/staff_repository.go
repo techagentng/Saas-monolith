@@ -67,6 +67,11 @@ type CapabilityRepository interface {
 	ListStaffIDsForService(ctx context.Context, tenantID string, serviceID string) ([]string, error)
 	// DeleteAll removes every capability row for one staff member.
 	DeleteAll(ctx context.Context, tenantID string, staffID string) error
+	// DeleteAllForService removes every capability row for one service — the
+	// service-side mirror of DeleteAll, used to replace the complete set of
+	// staff assigned to a service rather than the complete set of services a
+	// staff member performs.
+	DeleteAllForService(ctx context.Context, tenantID string, serviceID string) error
 	// Assign records one capability. The composite foreign keys on the table
 	// mean a cross-tenant pairing is refused by the database itself, whatever
 	// the caller believes.

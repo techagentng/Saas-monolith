@@ -79,6 +79,16 @@ type StaffService interface {
 	// every requested assignment persists or none does — a set containing one
 	// unknown or foreign service leaves the previous set entirely intact.
 	ReplaceCapabilities(ctx context.Context, tenantID string, staffID string, serviceIDs []string) ([]string, error)
+	// ListServiceStaff returns the staff IDs currently assigned to one
+	// service — ListCapabilities run the other way round. SC2's owner-facing
+	// mirror of the public technician-discovery endpoint (S9), for the
+	// authenticated "who can perform this service" view.
+	ListServiceStaff(ctx context.Context, tenantID string, serviceID string) ([]string, error)
+	// ReplaceServiceStaff sets the complete set of staff assigned to one
+	// service, atomically — ReplaceCapabilities run the other way round. Same
+	// staff_services table, same replace-as-a-whole-set semantics: whatever is
+	// sent becomes the service's technician set.
+	ReplaceServiceStaff(ctx context.Context, tenantID string, serviceID string, staffIDs []string) ([]string, error)
 }
 
 type staffService struct {
@@ -358,6 +368,114 @@ func validateStaffIdentifiers(tenantID string, staffID string) error {
 		return apperrors.New(apperrors.CodeInvalidRequest, "invalid staff id", err)
 	}
 	return nil
+}
+
+// validateServiceIdentifiers is validateStaffIdentifiers' service-side
+// counterpart, for the ListServiceStaff/ReplaceServiceStaff pair below.
+func validateServiceIdentifiers(tenantID string, serviceID string) error {
+	if _, err := uuid.Parse(tenantID); err != nil {
+		return apperrors.New(apperrors.CodeInvalidRequest, "invalid tenant id", err)
+	}
+	if _, err := uuid.Parse(serviceID); err != nil {
+		return apperrors.New(apperrors.CodeInvalidRequest, "invalid service id", err)
+	}
+	return nil
+}
+
+// ListServiceStaff returns the staff IDs assigned to one service.
+//
+// Resolved through the service repository first so an unknown or foreign
+// service ID yields the catalog's own not-found error rather than an empty
+// staff list, which would wrongly imply the service exists with nothing
+// assigned — the same reasoning ListCapabilities applies from the staff side.
+func (s *staffService) ListServiceStaff(ctx context.Context, tenantID string, serviceID string) ([]string, error) {
+	if err := validateServiceIdentifiers(tenantID, serviceID); err != nil {
+		return nil, err
+	}
+	if _, err := s.services.FindByID(ctx, tenantID, serviceID); err != nil {
+		return nil, err
+	}
+	return s.capabilities.ListStaffIDsForService(ctx, tenantID, serviceID)
+}
+
+// ReplaceServiceStaff sets the complete set of staff who can perform one
+// service, atomically — ReplaceCapabilities run the other way round, over the
+// exact same staff_services table and CapabilityRepository.
+//
+// The service must exist in this tenant, and every staff id must too, both
+// checked BEFORE the transaction opens so a set naming an unknown or another
+// tenant's staff member never clears the existing assignments. Inside the
+// transaction the old rows for this service are deleted and the new ones
+// inserted; any failure rolls the whole thing back, leaving the previous set
+// exactly as it was. The composite foreign keys on staff_services are the
+// backstop beneath all of it, exactly as ReplaceCapabilities documents.
+func (s *staffService) ReplaceServiceStaff(ctx context.Context, tenantID string, serviceID string, staffIDs []string) ([]string, error) {
+	if err := validateServiceIdentifiers(tenantID, serviceID); err != nil {
+		return nil, err
+	}
+
+	// The service must exist in this tenant. Checked before anything is
+	// written, and reported as the catalog's own not-found error identically
+	// for a missing service and one belonging to another tenant.
+	if _, err := s.services.FindByID(ctx, tenantID, serviceID); err != nil {
+		return nil, err
+	}
+
+	// De-duplicate while preserving the caller's intent: sending the same
+	// staff id twice is a sloppy request, not an error, but it must not
+	// attempt two inserts of the same primary key.
+	unique := make([]string, 0, len(staffIDs))
+	seen := make(map[string]struct{}, len(staffIDs))
+	for _, id := range staffIDs {
+		if _, err := uuid.Parse(id); err != nil {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "invalid staff id in technician set", err)
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+
+	// Every staff member must exist in THIS tenant. FindByID is
+	// tenant-scoped, so a staff id belonging to another tenant is
+	// indistinguishable from a nonexistent one — the caller learns their set
+	// is invalid, not whether that ID exists elsewhere on the platform.
+	for _, id := range unique {
+		if _, err := s.staff.FindByID(ctx, tenantID, id); err != nil {
+			return nil, apperrors.New(apperrors.CodeValidationFailed, "technician set names a staff member that does not belong to this tenant", err)
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("starting service staff replacement transaction: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	capabilities := repository.NewPostgresCapabilityRepository(tx)
+	if err := capabilities.DeleteAllForService(ctx, tenantID, serviceID); err != nil {
+		return nil, err
+	}
+	for _, id := range unique {
+		if err := capabilities.Assign(ctx, tenantID, id, serviceID); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing service staff replacement: %w", err)
+	}
+	committed = true
+
+	// Read back through the non-transactional repository so the response
+	// reflects committed state rather than the caller's request echoed back.
+	return s.capabilities.ListStaffIDsForService(ctx, tenantID, serviceID)
 }
 
 // compile-time guard: the implementation must keep satisfying its interface.

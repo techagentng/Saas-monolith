@@ -620,6 +620,38 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		),
 	)))
 
+	// SC2 service-centric technician assignment: the S3 staff_services
+	// capability relationship read/written from the service side rather than
+	// the staff side (same table, same StaffHandler/StaffService — no
+	// parallel capability system). This is what lets the owner-facing Add
+	// Service flow and Services page assign technicians to a service
+	// directly, instead of looping the staff-side PUT above once per
+	// technician (which would replace that technician's ENTIRE capability
+	// set, clobbering their other services).
+	//
+	// Route authorization matrix:
+	//   GET  /api/v1/tenants/{tenantID}/services/{serviceID}/staff  TENANT  staff.read
+	//   PUT  /api/v1/tenants/{tenantID}/services/{serviceID}/staff  TENANT  staff.update
+	//
+	// Same permission family as S3's staff-side routes above, not
+	// service.read/service.update: this changes who can perform the service,
+	// never the service definition itself — see TestCapabilityAssignmentRequiresStaffUpdateNotServiceUpdate.
+	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
+	api.Handle("GET /api/v1/tenants/{tenantID}/services/{serviceID}/staff", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.read"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.ListServiceStaff(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+	api.Handle("PUT /api/v1/tenants/{tenantID}/services/{serviceID}/staff", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "staff.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				staffHandler.ReplaceServiceStaff(writer, request, request.PathValue("tenantID"), request.PathValue("serviceID"))
+			}),
+		),
+	)))
+
 	// Scheduling S5 working hours:
 	//   GET  /api/v1/tenants/{tenantID}/staff/{staffID}/working-hours  TENANT  staff.read
 	//   PUT  /api/v1/tenants/{tenantID}/staff/{staffID}/working-hours  TENANT  staff.update

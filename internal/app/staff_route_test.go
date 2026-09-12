@@ -331,6 +331,85 @@ func TestStaffRoutesDenyADisabledTenant(t *testing.T) {
 	}
 }
 
+// --- SC2: service-side staff assignment (/services/{serviceID}/staff) -------
+
+// Same protection as TestCapabilityAssignmentRequiresStaffUpdateNotServiceUpdate,
+// mirrored for the service-side route: a caller with full catalog permissions
+// but no staff.update must still be refused, because this changes who can
+// perform the service, never the service definition itself.
+func TestServiceStaffAssignmentRequiresStaffUpdateNotServiceUpdate(t *testing.T) {
+	scenario := staffScenario()
+	catalogOnly := []string{"tenant.read", "staff.read", "service.read", "service.create", "service.update", "service.archive"}
+	handler, tokens, store := buildStaffRoutes(t, scenario, catalogOnly)
+	recorder := httptest.NewRecorder()
+
+	path := "/api/v1/tenants/" + staffRouteTenantA + "/services/" + staffRouteServiceA + "/staff"
+	handler.ServeHTTP(recorder, staffRequest(t, tokens, http.MethodPut, path, `{"staff_ids":[]}`))
+
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, body = %s, want 403 — service.* must not authorize technician assignment", recorder.Code, recorder.Body.String())
+	}
+	assertBodyCode(t, recorder, "PERMISSION_DENIED")
+	if store.writeCalls != 0 {
+		t.Fatal("a denied technician assignment reached the repository")
+	}
+}
+
+// A service id that genuinely exists, but under a DIFFERENT tenant, must
+// behave exactly like an unknown service — no cross-tenant existence leak.
+func TestServiceStaffRoutesDenyCrossTenantService(t *testing.T) {
+	scenario := staffScenario()
+	const foreignServiceID = "550e8400-e29b-41d4-a716-446655451007"
+	scenario.services[foreignServiceID] = &schedulingmodel.Service{ID: foreignServiceID, TenantID: staffRouteTenantB, Name: "Rival Service", Status: schedulingmodel.StatusActive}
+	handler, tokens, store := buildStaffRoutes(t, scenario, ownerStaffPermissions)
+
+	for _, test := range []struct {
+		name   string
+		method string
+		body   string
+	}{
+		{"list", http.MethodGet, ""},
+		{"replace", http.MethodPut, `{"staff_ids":[]}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			path := "/api/v1/tenants/" + staffRouteTenantA + "/services/" + foreignServiceID + "/staff"
+			handler.ServeHTTP(recorder, staffRequest(t, tokens, test.method, path, test.body))
+
+			if recorder.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, body = %s, want 404 — a foreign tenant's service must read as not found", recorder.Code, recorder.Body.String())
+			}
+			assertBodyCode(t, recorder, "SERVICE_NOT_FOUND")
+		})
+	}
+	if store.writeCalls != 0 {
+		t.Fatal("a cross-tenant service request reached the staff repository")
+	}
+}
+
+// STAFF holds staff.read only: it can see who is assigned, but cannot change it.
+func TestStaffRoleCanReadServiceStaffButCannotReplace(t *testing.T) {
+	scenario := staffScenario()
+	handler, tokens, store := buildStaffRoutes(t, scenario, staffStaffPermissions)
+	base := "/api/v1/tenants/" + staffRouteTenantA + "/services/" + staffRouteServiceA + "/staff"
+
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, staffRequest(t, tokens, http.MethodGet, base, ""))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, body = %s, want 200 for STAFF", recorder.Code, recorder.Body.String())
+	}
+
+	recorder = httptest.NewRecorder()
+	handler.ServeHTTP(recorder, staffRequest(t, tokens, http.MethodPut, base, `{"staff_ids":[]}`))
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("PUT status = %d, body = %s, want 403 for STAFF", recorder.Code, recorder.Body.String())
+	}
+	assertBodyCode(t, recorder, "PERMISSION_DENIED")
+	if store.writeCalls != 0 {
+		t.Fatal("a denied technician assignment reached the repository")
+	}
+}
+
 // A staff ID that genuinely exists under another tenant must be
 // indistinguishable from one that does not exist.
 func TestGetDoesNotDiscloseAnotherTenantsStaffID(t *testing.T) {
@@ -441,6 +520,13 @@ func buildStaffRoutes(t *testing.T, scenario *staffScenarioState, tenantPermissi
 	}))
 	mux.Handle("PUT /api/v1/tenants/{tenantID}/staff/{staffID}/services", wrap("staff.update", func(w http.ResponseWriter, r *http.Request) {
 		staffHandler.ReplaceCapabilities(w, r, r.PathValue("tenantID"), r.PathValue("staffID"))
+	}))
+	// SC2: the service-side mirror of the two routes above.
+	mux.Handle("GET /api/v1/tenants/{tenantID}/services/{serviceID}/staff", wrap("staff.read", func(w http.ResponseWriter, r *http.Request) {
+		staffHandler.ListServiceStaff(w, r, r.PathValue("tenantID"), r.PathValue("serviceID"))
+	}))
+	mux.Handle("PUT /api/v1/tenants/{tenantID}/services/{serviceID}/staff", wrap("staff.update", func(w http.ResponseWriter, r *http.Request) {
+		staffHandler.ReplaceServiceStaff(w, r, r.PathValue("tenantID"), r.PathValue("serviceID"))
 	}))
 	return mux, tokens, staffStore
 }
@@ -568,6 +654,19 @@ func (r *statefulCapabilityRepository) ListStaffIDsForService(_ context.Context,
 
 func (r *statefulCapabilityRepository) DeleteAll(_ context.Context, _ string, staffID string) error {
 	delete(r.assignments, staffID)
+	return nil
+}
+
+func (r *statefulCapabilityRepository) DeleteAllForService(_ context.Context, _ string, serviceID string) error {
+	for staffID, ids := range r.assignments {
+		remaining := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if id != serviceID {
+				remaining = append(remaining, id)
+			}
+		}
+		r.assignments[staffID] = remaining
+	}
 	return nil
 }
 
