@@ -203,6 +203,68 @@ func TestBookingListCancelledView(t *testing.T) {
 	}
 }
 
+// The tenant here is Africa/Lagos (UTC+1) — deliberately so a date filter
+// bug that used UTC calendar days instead of the tenant's would be visible:
+// a booking at 2026-09-06 23:30 UTC is 2026-09-07 00:30 in Lagos, and must
+// be INCLUDED by date=2026-09-07 despite falling on the previous UTC day.
+func TestBookingListDateFilterUsesTheTenantsCalendarDayNotUTC(t *testing.T) {
+	scenario := bookingScenario(t)
+	sameLagosDay := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed,
+		time.Date(2026, 9, 6, 23, 30, 0, 0, time.UTC)) // 2026-09-07 00:30 Africa/Lagos
+	differentDay := bmRouteBooking(bmRouteBookingB, staffRouteTenantA, schedulingmodel.BookingConfirmed,
+		time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)) // 2026-09-08 11:00 Africa/Lagos
+	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, sameLagosDay, differentDay)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=all&date=2026-09-07", ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0]["id"] != bmRouteBookingA {
+		t.Fatalf("rows = %v, want only the booking that falls on 2026-09-07 Africa/Lagos", rows)
+	}
+}
+
+func TestBookingListRejectsAnInvalidDateFilter(t *testing.T) {
+	handler, tokens, _ := buildBookingManagementRoutes(t, bookingScenario(t), bookingManagePermissions)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=all&date=07-09-2026", ""))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want 400", rec.Code, rec.Body.String())
+	}
+	assertBodyCode(t, rec, "VALIDATION_FAILED")
+}
+
+func TestBookingListFiltersByStaffAndService(t *testing.T) {
+	scenario := bookingScenario(t)
+	const otherStaff = "550e8400-e29b-41d4-a716-4466554f0099"
+	scenario.profiles[otherStaff] = &schedulingmodel.StaffProfile{ID: otherStaff, TenantID: staffRouteTenantA, DisplayName: "Bola", IsBookable: true, Status: schedulingmodel.StatusActive}
+	forA := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
+	forOther := bmRouteBooking(bmRouteBookingB, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(25*time.Hour))
+	forOther.StaffID = otherStaff
+	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, forA, forOther)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=all&staff_id="+staffRouteStaffA, ""))
+	var rows []map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &rows)
+	if len(rows) != 1 || rows[0]["id"] != bmRouteBookingA {
+		t.Fatalf("staff_id filter = %v, want only bookingA", rows)
+	}
+
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=all&service_id="+staffRouteServiceA, ""))
+	var rows2 []map[string]any
+	_ = json.Unmarshal(rec2.Body.Bytes(), &rows2)
+	if len(rows2) != 2 {
+		t.Fatalf("service_id filter = %v, want both bookings (same service)", rows2)
+	}
+}
+
 func TestBookingListRejectsInvalidView(t *testing.T) {
 	handler, tokens, _ := buildBookingManagementRoutes(t, bookingScenario(t), bookingManagePermissions)
 	rec := httptest.NewRecorder()

@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
+	"github.com/techagentng/saas-monolith/internal/scheduling/availability"
 	"github.com/techagentng/saas-monolith/internal/scheduling/model"
 	"github.com/techagentng/saas-monolith/internal/scheduling/repository"
 )
@@ -65,6 +66,11 @@ type BookingListFilter struct {
 	View      BookingView
 	StaffID   *string
 	ServiceID *string
+	// Date, if set, is a calendar date in YYYY-MM-DD form, interpreted in
+	// the TENANT's own authoritative timezone — never the server's, and
+	// never a caller-supplied zone — matching the S7 availability engine's
+	// own date semantics exactly (see resolveTenantLocation).
+	Date *string
 }
 
 // BookingSummary is one dashboard list row. StartAt/EndAt/CreatedAt stay
@@ -143,7 +149,7 @@ func (s *bookingManagementService) List(ctx context.Context, tenantID string, fi
 	if _, err := uuid.Parse(tenantID); err != nil {
 		return nil, apperrors.New(apperrors.CodeInvalidRequest, "invalid tenant id", err)
 	}
-	repoFilter, err := s.toRepoFilter(filter)
+	repoFilter, err := s.toRepoFilter(ctx, tenantID, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +207,7 @@ func (s *bookingManagementService) Cancel(ctx context.Context, tenantID string, 
 	return s.toDetail(ctx, tenantID, refreshed)
 }
 
-func (s *bookingManagementService) toRepoFilter(filter BookingListFilter) (repository.BookingListFilter, error) {
+func (s *bookingManagementService) toRepoFilter(ctx context.Context, tenantID string, filter BookingListFilter) (repository.BookingListFilter, error) {
 	out := repository.BookingListFilter{StaffID: trimmedIDOrNil(filter.StaffID), ServiceID: trimmedIDOrNil(filter.ServiceID)}
 	if out.StaffID != nil {
 		if _, err := uuid.Parse(*out.StaffID); err != nil {
@@ -228,6 +234,29 @@ func (s *bookingManagementService) toRepoFilter(filter BookingListFilter) (repos
 	default:
 		return repository.BookingListFilter{}, apperrors.New(apperrors.CodeValidationFailed, "invalid booking view", nil)
 	}
+
+	if date := trimmedIDOrNil(filter.Date); date != nil {
+		parsedDate, err := availability.ParseDate(*date)
+		if err != nil {
+			return repository.BookingListFilter{}, apperrors.New(apperrors.CodeValidationFailed, "date must be a calendar date in YYYY-MM-DD form", err)
+		}
+		tenant, err := s.tenants.FindByID(ctx, tenantID)
+		if err != nil {
+			return repository.BookingListFilter{}, err
+		}
+		location, err := resolveTenantLocation(tenant)
+		if err != nil {
+			return repository.BookingListFilter{}, err
+		}
+		// [dayStart, dayEnd) in the TENANT's timezone — the identical
+		// day-boundary construction availability_service.go's GetAvailability
+		// uses, so "date=2026-09-12" means the same calendar day here as it
+		// does for the public availability query, DST included.
+		dayStart := time.Date(parsedDate.Year, parsedDate.Month, parsedDate.Day, 0, 0, 0, 0, location)
+		dayEnd := dayStart.AddDate(0, 0, 1)
+		out.StartAtFrom, out.StartAtTo = &dayStart, &dayEnd
+	}
+
 	return out, nil
 }
 

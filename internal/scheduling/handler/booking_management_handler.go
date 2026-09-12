@@ -77,10 +77,13 @@ func toTenantBookingDetail(d *service.BookingDetail) TenantBookingDetail {
 	return TenantBookingDetail{TenantBooking: toTenantBooking(d.BookingSummary), Timezone: d.Timezone}
 }
 
-// List handles GET /api/v1/tenants/{tenantID}/bookings?view=&staff_id=&service_id=.
+// List handles GET /api/v1/tenants/{tenantID}/bookings?view=&staff_id=&service_id=&date=.
 //
 // view is one of upcoming (default) / past / cancelled / all. staff_id and
-// service_id are optional exact filters. All filtering happens in the database.
+// service_id are optional exact filters. date, if given, is a calendar date
+// in YYYY-MM-DD form interpreted in the TENANT's own timezone (never the
+// server's) — the same date semantics the public availability endpoint
+// uses. All filtering happens in the database.
 func (h *BookingManagementHandler) List(writer http.ResponseWriter, request *http.Request, tenantID string) {
 	query := request.URL.Query()
 	view, err := service.ParseBookingView(query.Get("view"))
@@ -93,6 +96,7 @@ func (h *BookingManagementHandler) List(writer http.ResponseWriter, request *htt
 		View:      view,
 		StaffID:   optionalQuery(query.Get("staff_id")),
 		ServiceID: optionalQuery(query.Get("service_id")),
+		Date:      optionalQuery(query.Get("date")),
 	})
 	if err != nil {
 		writeSchedulingError(writer, err)

@@ -362,3 +362,91 @@ func TestBookingRepositoryCancelReopensOccupancy(t *testing.T) {
 }
 
 func ptrStatus(s model.BookingStatus) *model.BookingStatus { return &s }
+
+// S11: staff_id/service_id filters, the date-range filter, and deterministic
+// ordering, all against a real database — the fake store in
+// booking_management_service_test.go does not implement these filters
+// itself (that's this repository's job), so this is the one place they are
+// genuinely proven.
+func TestBookingRepositoryListFiltersAndOrdersDeterministically(t *testing.T) {
+	db := openSchedulingTestDB(t)
+	seedBookingPrerequisites(t, db)
+	ctx := context.Background()
+
+	// A second technician under tenant A, performing the same service, so
+	// the staff_id filter has something real to distinguish.
+	const staffC = "550e8400-e29b-41d4-a716-4466554d7001"
+	if _, err := NewPostgresStaffRepository(db).Create(ctx, &model.StaffProfile{ID: staffC, TenantID: bkTenantA, DisplayName: "Chidi", IsBookable: true}); err != nil {
+		t.Fatalf("seeding staff C: %v", err)
+	}
+
+	repo := NewPostgresBookingRepository(db)
+	// Deliberately created out of chronological order, so a passing
+	// ordering assertion cannot be an accident of insertion order.
+	late := "550e8400-e29b-41d4-a716-4466554d7002"    // staffA, 14:00
+	early := "550e8400-e29b-41d4-a716-4466554d7003"   // staffA, 09:00
+	other := "550e8400-e29b-41d4-a716-4466554d7004"   // staffC, 11:00
+	nextDay := "550e8400-e29b-41d4-a716-4466554d7005" // staffA, next day 09:00
+
+	for _, b := range []*model.Booking{
+		bookingAt(late, bkTenantA, bkStaffA, 14, 0),
+		bookingAt(early, bkTenantA, bkStaffA, 9, 0),
+		bookingAt(other, bkTenantA, staffC, 11, 0),
+	} {
+		if _, err := repo.Create(ctx, b); err != nil {
+			t.Fatalf("seeding %s: %v", b.ID, err)
+		}
+	}
+	nextDayBooking := bookingAt(nextDay, bkTenantA, bkStaffA, 9, 0)
+	nextDayBooking.StartAt = nextDayBooking.StartAt.AddDate(0, 0, 1)
+	nextDayBooking.EndAt = nextDayBooking.EndAt.AddDate(0, 0, 1)
+	if _, err := repo.Create(ctx, nextDayBooking); err != nil {
+		t.Fatalf("seeding next-day booking: %v", err)
+	}
+
+	// staff_id filter: only staffA's two bookings, ordered by start_at ASC.
+	staffFilter := bkStaffA
+	byStaff, err := repo.ListByTenant(ctx, bkTenantA, BookingListFilter{StaffID: &staffFilter})
+	if err != nil {
+		t.Fatalf("ListByTenant(staff filter): %v", err)
+	}
+	if len(byStaff) != 3 {
+		t.Fatalf("staff-filtered list = %d rows, want 3 (early, late, next-day)", len(byStaff))
+	}
+	if byStaff[0].Booking.ID != early || byStaff[1].Booking.ID != late || byStaff[2].Booking.ID != nextDay {
+		t.Fatalf("ordering wrong: got %s, %s, %s", byStaff[0].Booking.ID, byStaff[1].Booking.ID, byStaff[2].Booking.ID)
+	}
+
+	// service_id filter: bkServiceA is shared by all four bookings here, so
+	// this proves the condition is applied without proving exclusion on its
+	// own — paired with the staff filter above, both conditions are
+	// independently verified.
+	serviceFilter := bkServiceA
+	byService, err := repo.ListByTenant(ctx, bkTenantA, BookingListFilter{ServiceID: &serviceFilter})
+	if err != nil {
+		t.Fatalf("ListByTenant(service filter): %v", err)
+	}
+	if len(byService) != 4 {
+		t.Fatalf("service-filtered list = %d rows, want 4", len(byService))
+	}
+
+	// Date-range filter: [day 1 00:00, day 2 00:00) must exclude the
+	// next-day booking and include the other three, still ordered.
+	dayStart := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
+	dayEnd := dayStart.AddDate(0, 0, 1)
+	byDate, err := repo.ListByTenant(ctx, bkTenantA, BookingListFilter{StartAtFrom: &dayStart, StartAtTo: &dayEnd})
+	if err != nil {
+		t.Fatalf("ListByTenant(date filter): %v", err)
+	}
+	if len(byDate) != 3 {
+		t.Fatalf("date-filtered list = %d rows, want 3 (next-day booking excluded)", len(byDate))
+	}
+	for _, row := range byDate {
+		if row.Booking.ID == nextDay {
+			t.Fatal("date filter [dayStart, dayEnd) leaked the next day's booking")
+		}
+	}
+	if byDate[0].Booking.ID != early || byDate[1].Booking.ID != other || byDate[2].Booking.ID != late {
+		t.Fatalf("date-filtered ordering wrong: got %s, %s, %s", byDate[0].Booking.ID, byDate[1].Booking.ID, byDate[2].Booking.ID)
+	}
+}
