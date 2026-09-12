@@ -41,6 +41,11 @@ func bookingAt(id, tenantID, staffID string, hour, minute int) *model.Booking {
 		StartAt:   start,
 		EndAt:     start.Add(30 * time.Minute),
 		Status:    model.BookingConfirmed,
+		// receipt_access_token is UNIQUE (migration 000021) — derived from
+		// id, which every caller here already keeps unique per booking, so
+		// two bookings in the same test never collide the way two bookings
+		// both leaving this field as the Go zero value ("") would.
+		ReceiptAccessToken: "test-token-" + id,
 	}
 }
 

@@ -84,8 +84,8 @@ func NewPostgresBookingRepository(db dbtx) *PostgresBookingRepository {
 //     the working-hours repository handles the identical situation.
 func (r *PostgresBookingRepository) Create(ctx context.Context, booking *model.Booking) (*model.Booking, error) {
 	const query = `INSERT INTO bookings
-        (id, tenant_id, service_id, staff_id, customer_name, customer_phone, customer_email, start_at, end_at, status)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        (id, tenant_id, service_id, staff_id, customer_name, customer_phone, customer_email, start_at, end_at, status, receipt_access_token)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING created_at, updated_at`
 
 	status := booking.Status
@@ -98,7 +98,7 @@ func (r *PostgresBookingRepository) Create(ctx context.Context, booking *model.B
 	err := r.db.QueryRowContext(ctx, query,
 		booking.ID, booking.TenantID, booking.ServiceID, booking.StaffID,
 		booking.Customer.Name, booking.Customer.Phone, booking.Customer.Email,
-		booking.StartAt.UTC(), booking.EndAt.UTC(), string(status),
+		booking.StartAt.UTC(), booking.EndAt.UTC(), string(status), booking.ReceiptAccessToken,
 	).Scan(&created.CreatedAt, &created.UpdatedAt)
 	if err != nil {
 		if isBookingOverlapViolation(err) {
@@ -204,6 +204,29 @@ func (r *PostgresBookingRepository) FindByTenantAndID(ctx context.Context, tenan
 		return nil, fmt.Errorf("finding booking: %w", err)
 	}
 	return item, nil
+}
+
+// FindByTenantAndReceiptToken resolves one booking by its S12-BE receipt
+// access token, scoped to one tenant. A missing, cross-tenant, or wrong token
+// yields BOOKING_NOT_FOUND — indistinguishable from FindByTenantAndID's own
+// non-disclosure, so a public caller cannot tell "wrong token" from "no such
+// booking" from "belongs to another tenant".
+//
+// Deliberately NOT part of bookingRelationSelect/scanBookingWithRelations:
+// the receipt service resolves current service/staff/tenant data itself
+// (mirroring BookingService.CreatePublicBooking), so this stays a plain,
+// minimal lookup — the token is a WHERE-clause value here, never a SELECTed
+// column, matching model.Booking's own doc comment on ReceiptAccessToken.
+func (r *PostgresBookingRepository) FindByTenantAndReceiptToken(ctx context.Context, tenantID string, token string) (*model.Booking, error) {
+	row := r.db.QueryRowContext(ctx, "SELECT "+bookingColumns+" FROM bookings WHERE tenant_id = $1 AND receipt_access_token = $2", tenantID, token)
+	booking, err := scanBooking(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, apperrors.New(apperrors.CodeBookingNotFound, "booking not found", nil)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("finding booking by receipt token: %w", err)
+	}
+	return booking, nil
 }
 
 // Cancel flips a CONFIRMED booking to CANCELLED in place, scoped by both id and

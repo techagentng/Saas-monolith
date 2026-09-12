@@ -15,6 +15,7 @@ import (
 	"github.com/techagentng/saas-monolith/internal/scheduling/availability"
 	schedulinghandler "github.com/techagentng/saas-monolith/internal/scheduling/handler"
 	schedulingmodel "github.com/techagentng/saas-monolith/internal/scheduling/model"
+	"github.com/techagentng/saas-monolith/internal/scheduling/receipt"
 	schedulingrepository "github.com/techagentng/saas-monolith/internal/scheduling/repository"
 	schedulingservice "github.com/techagentng/saas-monolith/internal/scheduling/service"
 	tenantmodel "github.com/techagentng/saas-monolith/internal/tenant/model"
@@ -134,6 +135,17 @@ func (r *statefulBookingRepository) FindByTenantAndID(_ context.Context, tenantI
 	return nil, apperrors.New(apperrors.CodeBookingNotFound, "booking not found", nil)
 }
 
+func (r *statefulBookingRepository) FindByTenantAndReceiptToken(_ context.Context, tenantID, token string) (*schedulingmodel.Booking, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, b := range r.bookings {
+		if b.ReceiptAccessToken == token && b.TenantID == tenantID {
+			return b, nil
+		}
+	}
+	return nil, apperrors.New(apperrors.CodeBookingNotFound, "booking not found", nil)
+}
+
 func (r *statefulBookingRepository) Cancel(_ context.Context, tenantID, bookingID string) (*schedulingmodel.Booking, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -171,9 +183,11 @@ func buildPublicBookingRoutes(f *s9Fixture) (http.Handler, *s9TenantRepo, *state
 	)
 	bookingSvc := schedulingservice.NewBookingService(publicTenant, engine, serviceStore, staffStore, bookingStore)
 	availabilitySvc := schedulingservice.NewPublicAvailabilityService(publicTenant, engine)
+	receiptSvc := schedulingservice.NewBookingReceiptService(publicTenant, bookingStore, serviceStore, staffStore, &fakeRouteReceiptGenerator{})
 
 	bookingHandler := schedulinghandler.NewPublicBookingHandler(bookingSvc)
 	availabilityHandler := schedulinghandler.NewPublicAvailabilityHandler(availabilitySvc)
+	receiptHandler := schedulinghandler.NewPublicBookingReceiptHandler(receiptSvc)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/public/tenants/{slug}/bookings", func(w http.ResponseWriter, r *http.Request) {
@@ -182,7 +196,20 @@ func buildPublicBookingRoutes(f *s9Fixture) (http.Handler, *s9TenantRepo, *state
 	mux.HandleFunc("GET /api/v1/public/tenants/{slug}/availability", func(w http.ResponseWriter, r *http.Request) {
 		availabilityHandler.Get(w, r, r.PathValue("slug"))
 	})
+	mux.HandleFunc("GET /api/v1/public/tenants/{slug}/bookings/{reference}/receipt", func(w http.ResponseWriter, r *http.Request) {
+		receiptHandler.Get(w, r, r.PathValue("slug"), r.PathValue("reference"))
+	})
 	return mux, tenantRepo, bookingStore
+}
+
+// fakeRouteReceiptGenerator stands in for the real receipt.Generator (which
+// would otherwise pull in go-pdf/fpdf here) — these route tests assert HTTP
+// wiring, status codes, and access control, never PDF byte content, which
+// internal/scheduling/receipt's own tests already cover.
+type fakeRouteReceiptGenerator struct{}
+
+func (fakeRouteReceiptGenerator) Generate(context.Context, receipt.Data) ([]byte, error) {
+	return []byte("%PDF-route-test"), nil
 }
 
 func bookingBody(serviceID, staffID, date, start string) string {
@@ -418,6 +445,125 @@ func TestPublicBookingRouteRejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+// --- S12-BE: public receipt route ---------------------------------------
+
+type createdBookingBody struct {
+	Booking struct {
+		Reference    string `json:"reference"`
+		ReceiptToken string `json:"receipt_token"`
+	} `json:"booking"`
+}
+
+func createBookingAndExtractReceiptCredentials(t *testing.T, handler http.Handler) (reference, token string) {
+	t.Helper()
+	rec := postBooking(t, handler, "glamour-nails", bookingBody(s9ServiceA, s9StaffA, s9MondayDate, "09:30"), false)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("booking creation status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var body createdBookingBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("invalid JSON: %v (%s)", err, rec.Body.String())
+	}
+	if body.Booking.ReceiptToken == "" {
+		t.Fatal("booking creation response has no receipt_token")
+	}
+	return body.Booking.Reference, body.Booking.ReceiptToken
+}
+
+func getReceipt(handler http.Handler, slug, reference, token string) *httptest.ResponseRecorder {
+	path := "/api/v1/public/tenants/" + slug + "/bookings/" + reference + "/receipt"
+	if token != "" {
+		path += "?token=" + token
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	return rec
+}
+
+func TestPublicBookingReceiptRouteEndToEnd(t *testing.T) {
+	handler, _, _ := buildPublicBookingRoutes(s9NailFixture())
+	reference, token := createBookingAndExtractReceiptCredentials(t, handler)
+
+	rec := getReceipt(handler, "glamour-nails", reference, token)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s, want 200", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/pdf" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := rec.Header().Get("Content-Disposition"); got != `attachment; filename="booking-`+reference+`.pdf"` {
+		t.Fatalf("Content-Disposition = %q", got)
+	}
+	if rec.Body.Len() == 0 {
+		t.Fatal("receipt body is empty")
+	}
+}
+
+func TestPublicBookingReceiptRouteRejectsAWrongToken(t *testing.T) {
+	handler, _, _ := buildPublicBookingRoutes(s9NailFixture())
+	reference, _ := createBookingAndExtractReceiptCredentials(t, handler)
+
+	rec := getReceipt(handler, "glamour-nails", reference, "totally-wrong-token")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s, want 404", rec.Code, rec.Body.String())
+	}
+	assertBodyCode(t, rec, "BOOKING_NOT_FOUND")
+}
+
+func TestPublicBookingReceiptRouteRejectsAMissingToken(t *testing.T) {
+	handler, _, _ := buildPublicBookingRoutes(s9NailFixture())
+	reference, _ := createBookingAndExtractReceiptCredentials(t, handler)
+
+	rec := getReceipt(handler, "glamour-nails", reference, "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s, want 400", rec.Code, rec.Body.String())
+	}
+	assertBodyCode(t, rec, "VALIDATION_FAILED")
+}
+
+func TestPublicBookingReceiptRouteRejectsAMismatchedReference(t *testing.T) {
+	handler, _, _ := buildPublicBookingRoutes(s9NailFixture())
+	_, token := createBookingAndExtractReceiptCredentials(t, handler)
+
+	rec := getReceipt(handler, "glamour-nails", "NB-DEADBEEF", token)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s, want 404", rec.Code, rec.Body.String())
+	}
+	assertBodyCode(t, rec, "BOOKING_NOT_FOUND")
+}
+
+// THE TENANT-ISOLATION PROOF: a booking genuinely persisted under a
+// DIFFERENT tenant than the one "glamour-nails" resolves to must never be
+// retrievable through that slug, even with its own correct token — the
+// receipt service scopes FindByTenantAndReceiptToken by the SLUG-resolved
+// tenant id, not merely by matching the token string.
+func TestPublicBookingReceiptRouteDeniesAnotherTenantsBooking(t *testing.T) {
+	handler, _, store := buildPublicBookingRoutes(s9NailFixture())
+
+	foreignToken := "foreign0123456789abcdef0123456789abcdef0123456789abcdef01234567"
+	store.mu.Lock()
+	store.bookings = append(store.bookings, &schedulingmodel.Booking{
+		ID:                 "660e8400-e29b-41d4-a716-446655440099",
+		TenantID:           s9TenantBID, // a DIFFERENT tenant than glamour-nails (s9TenantAID)
+		ServiceID:          s9ServiceB,
+		StaffID:            s9StaffB,
+		Customer:           schedulingmodel.Customer{Name: "Someone Else"},
+		StartAt:            time.Date(2026, 1, 5, 9, 0, 0, 0, time.UTC),
+		EndAt:              time.Date(2026, 1, 5, 9, 30, 0, 0, time.UTC),
+		Status:             schedulingmodel.BookingConfirmed,
+		ReceiptAccessToken: foreignToken,
+	})
+	store.mu.Unlock()
+	foreignReference := "NB-" + strings.ToUpper(strings.ReplaceAll("660e8400-e29b-41d4-a716-446655440099", "-", ""))[:8]
+
+	rec := getReceipt(handler, "glamour-nails", foreignReference, foreignToken)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, body = %s, want 404 — a foreign tenant's booking must be indistinguishable from a nonexistent one", rec.Code, rec.Body.String())
+	}
+	assertBodyCode(t, rec, "BOOKING_NOT_FOUND")
 }
 
 func TestPublicBookingRouteRejectsMalformedJSON(t *testing.T) {

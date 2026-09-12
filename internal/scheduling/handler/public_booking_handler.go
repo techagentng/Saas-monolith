@@ -65,6 +65,11 @@ type PublicBooking struct {
 	Start     string               `json:"start"`
 	End       string               `json:"end"`
 	Timezone  string               `json:"timezone"`
+	// ReceiptToken (S12-BE) is the customer's one and only chance to receive
+	// this secret — see model.Booking.ReceiptAccessToken's doc comment. Pass
+	// it as ?token= on GET .../bookings/{reference}/receipt to retrieve the
+	// PDF; no other endpoint ever returns it again.
+	ReceiptToken string `json:"receipt_token"`
 }
 
 // PublicBookingResponse wraps the booking under a "booking" key, matching the
@@ -102,14 +107,15 @@ func (h *PublicBookingHandler) Create(writer http.ResponseWriter, request *http.
 	}
 
 	writeJSON(writer, http.StatusCreated, PublicBookingResponse{Booking: PublicBooking{
-		ID:        result.ID,
-		Reference: result.Reference,
-		Status:    string(result.Status),
-		Service:   PublicBookingService{ID: result.ServiceID, Name: result.ServiceName},
-		Staff:     PublicBookingStaff{ID: result.StaffID, Name: result.StaffName},
-		Date:      result.Date,
-		Start:     result.Start,
-		End:       result.End,
-		Timezone:  result.Timezone,
+		ID:           result.ID,
+		Reference:    result.Reference,
+		Status:       string(result.Status),
+		Service:      PublicBookingService{ID: result.ServiceID, Name: result.ServiceName},
+		Staff:        PublicBookingStaff{ID: result.StaffID, Name: result.StaffName},
+		Date:         result.Date,
+		Start:        result.Start,
+		End:          result.End,
+		Timezone:     result.Timezone,
+		ReceiptToken: result.ReceiptToken,
 	}})
 }

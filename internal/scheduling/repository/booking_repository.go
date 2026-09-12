@@ -83,6 +83,17 @@ type BookingRepository interface {
 	// BOOKING_NOT_FOUND, identically.
 	FindByTenantAndID(ctx context.Context, tenantID string, bookingID string) (*BookingWithRelations, error)
 
+	// FindByTenantAndReceiptToken resolves one booking within one tenant by
+	// its S12-BE receipt access token — the public receipt endpoint's sole
+	// lookup path, deliberately separate from FindByTenantAndID (which an
+	// anonymous caller must never be able to drive with a guessed UUID). A
+	// missing, cross-tenant, or wrong token yields BOOKING_NOT_FOUND,
+	// identically — the same non-disclosure FindByTenantAndID already
+	// applies to id. Returns the plain booking (no join): the receipt
+	// service resolves current service/staff/tenant data itself, the same
+	// pattern BookingService.CreatePublicBooking already uses.
+	FindByTenantAndReceiptToken(ctx context.Context, tenantID string, token string) (*model.Booking, error)
+
 	// Cancel transitions a CONFIRMED booking in this tenant to CANCELLED,
 	// preserving the row. It returns (updated=true, booking) when it changed a
 	// row, and (updated=false, nil, nil) when no CONFIRMED booking with that
