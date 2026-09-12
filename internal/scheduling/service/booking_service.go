@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"strings"
 	"time"
 
@@ -59,6 +62,11 @@ type BookedAppointment struct {
 	Start       string // tenant-local "HH:MM"
 	End         string // tenant-local "HH:MM"
 	Timezone    string
+	// ReceiptToken (S12-BE) is the customer's one and only chance to receive
+	// the secret the public receipt endpoint requires — see
+	// model.Booking.ReceiptAccessToken's doc comment. It is returned here,
+	// in the creation response only, and never again by any other endpoint.
+	ReceiptToken string
 }
 
 // BookingService turns an S9 availability selection into a persisted
@@ -190,16 +198,22 @@ func (s *bookingService) CreatePublicBooking(ctx context.Context, slug string, i
 	// for display only.
 	endAt := startAt.Add(time.Duration(svc.DurationMinutes) * time.Minute)
 
+	receiptToken, err := generateReceiptAccessToken()
+	if err != nil {
+		return nil, fmt.Errorf("generating receipt access token: %w", err)
+	}
+
 	bookingID := uuid.NewString()
 	persisted, err := s.bookings.Create(ctx, &model.Booking{
-		ID:        bookingID,
-		TenantID:  tenantID,
-		ServiceID: input.ServiceID,
-		StaffID:   input.StaffID,
-		Customer:  customer,
-		StartAt:   startAt,
-		EndAt:     endAt,
-		Status:    model.BookingConfirmed,
+		ID:                 bookingID,
+		TenantID:           tenantID,
+		ServiceID:          input.ServiceID,
+		StaffID:            input.StaffID,
+		Customer:           customer,
+		StartAt:            startAt,
+		EndAt:              endAt,
+		Status:             model.BookingConfirmed,
+		ReceiptAccessToken: receiptToken,
 	})
 	if err != nil {
 		// A 23P01 from the exclusion constraint has already been mapped to
@@ -209,18 +223,33 @@ func (s *bookingService) CreatePublicBooking(ctx context.Context, slug string, i
 	}
 
 	return &BookedAppointment{
-		ID:          persisted.ID,
-		Reference:   bookingReference(persisted.ID),
-		Status:      persisted.Status,
-		ServiceID:   svc.ID,
-		ServiceName: svc.Name,
-		StaffID:     staffProfile.ID,
-		StaffName:   staffProfile.DisplayName,
-		Date:        requestedDate.String(),
-		Start:       slot.Start,
-		End:         slot.End,
-		Timezone:    avail.Timezone,
+		ID:           persisted.ID,
+		Reference:    bookingReference(persisted.ID),
+		Status:       persisted.Status,
+		ServiceID:    svc.ID,
+		ServiceName:  svc.Name,
+		StaffID:      staffProfile.ID,
+		StaffName:    staffProfile.DisplayName,
+		Date:         requestedDate.String(),
+		Start:        slot.Start,
+		End:          slot.End,
+		Timezone:     avail.Timezone,
+		ReceiptToken: persisted.ReceiptAccessToken,
 	}, nil
+}
+
+// generateReceiptAccessToken produces a 256-bit, cryptographically random,
+// hex-encoded token (64 characters) — independent of the booking id, so
+// knowing or guessing a booking's UUID (already visible in the creation
+// response as BookedAppointment.ID) confers no advantage toward guessing
+// this. Matches the entropy migration 000021's backfill uses for existing
+// rows.
+func generateReceiptAccessToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 // findSlot looks for a slot whose start matches the requested wall-clock time.

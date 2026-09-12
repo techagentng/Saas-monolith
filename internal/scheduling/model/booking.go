@@ -68,6 +68,19 @@ type Booking struct {
 	Status    BookingStatus
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// ReceiptAccessToken (S12-BE, migration 000021) is the sole secret a public
+	// receipt request must present — see the migration's own doc comment for
+	// why the existing display-only "reference" is not sufficient on its own.
+	// It is set once at creation and never rotated.
+	//
+	// This field is intentionally absent from every general read path
+	// (bookingColumns/scanBooking, the S11 owner-dashboard join) — only
+	// PostgresBookingRepository.Create (to persist it) and
+	// FindByTenantAndReceiptToken (to look a booking up BY it) ever touch the
+	// column. It must never appear in any authenticated or public JSON
+	// response except the one-time booking-creation confirmation, which is
+	// the customer's only chance to receive it.
+	ReceiptAccessToken string
 }
 
 // ValidateCustomer trims and bounds the public booking identity.

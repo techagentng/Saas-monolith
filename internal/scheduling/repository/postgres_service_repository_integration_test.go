@@ -46,6 +46,7 @@ var schedulingMigrations = []string{
 	"000018_add_booking_status_index.up.sql",
 	"000019_create_service_categories.up.sql",
 	"000020_create_service_images.up.sql",
+	"000021_add_booking_receipt_access_token.up.sql",
 }
 
 // schedulingTables is the drop order — children before parents, so foreign keys

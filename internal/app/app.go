@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/techagentng/saas-monolith/internal/auth"
@@ -19,6 +20,7 @@ import (
 	identityrepository "github.com/techagentng/saas-monolith/internal/identity/repository"
 	identityservice "github.com/techagentng/saas-monolith/internal/identity/service"
 	schedulinghandler "github.com/techagentng/saas-monolith/internal/scheduling/handler"
+	"github.com/techagentng/saas-monolith/internal/scheduling/receipt"
 	schedulingrepository "github.com/techagentng/saas-monolith/internal/scheduling/repository"
 	schedulingservice "github.com/techagentng/saas-monolith/internal/scheduling/service"
 	"github.com/techagentng/saas-monolith/internal/tenant"
@@ -211,6 +213,32 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	)
 	publicBookingHandler := schedulinghandler.NewPublicBookingHandler(bookingService)
 
+	// S12-BE: the anonymous, customer-facing PDF receipt download. Reuses
+	// the same PublicTenantResolver, S1 catalog reader and S3 staff reader
+	// as CreatePublicBooking above — no second lookup path is invented.
+	// Every receipt request must present the booking's own
+	// receipt_access_token (migration 000021); the display-only "reference"
+	// alone is never sufficient (see that migration's doc comment).
+	//
+	// The logo fetcher is restricted to this deployment's own configured
+	// media origin host — the SSRF defense S12-BE requires — even though no
+	// tenant-logo storage exists yet to ever populate a logo URL (confirmed
+	// by audit); every receipt today renders name-only, and that is by
+	// design, not a bug.
+	var logoAllowedHost string
+	if parsedMediaURL, err := url.Parse(cfg.MediaPublicBaseURL); err == nil {
+		logoAllowedHost = parsedMediaURL.Hostname()
+	}
+	receiptGenerator := receipt.NewPDFGenerator(receipt.NewHTTPLogoFetcher(logoAllowedHost))
+	bookingReceiptService := schedulingservice.NewBookingReceiptService(
+		publicTenantService,
+		bookingRepository,
+		serviceRepository,
+		schedulingrepository.NewPostgresStaffRepository(db),
+		receiptGenerator,
+	)
+	publicBookingReceiptHandler := schedulinghandler.NewPublicBookingReceiptHandler(bookingReceiptService)
+
 	// Scheduling S11: authenticated, tenant-scoped owner/staff booking
 	// management — list, detail, and cancel for the appointments S10 persists.
 	// It reads and cancels only; it never creates, and it touches no
@@ -291,6 +319,13 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// conflict is a deterministic 409 BOOKING_SLOT_UNAVAILABLE.
 	api.HandleFunc("POST /api/v1/public/tenants/{slug}/bookings", func(writer http.ResponseWriter, request *http.Request) {
 		publicBookingHandler.Create(writer, request, request.PathValue("slug"))
+	})
+	// Public booking receipt download (S12-BE): anonymous PDF retrieval,
+	// gated on the receipt_access_token query parameter — never the
+	// reference alone. Same bare-mux, pre-auth-middleware registration as
+	// every other public route.
+	api.HandleFunc("GET /api/v1/public/tenants/{slug}/bookings/{reference}/receipt", func(writer http.ResponseWriter, request *http.Request) {
+		publicBookingReceiptHandler.Get(writer, request, request.PathValue("slug"), request.PathValue("reference"))
 	})
 
 	// Service image files. Genuinely anonymous, like every other route in
