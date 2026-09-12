@@ -63,6 +63,15 @@ type StaffCapabilities struct {
 	ServiceIDs []string `json:"service_ids"`
 }
 
+// ServiceStaff is StaffCapabilities' service-side mirror (SC2): the set of
+// staff ids assigned to one service. Ids only, for the same reason —
+// resolving them to full staff profiles is this handler's own List/Get, and
+// duplicating profile fields here would create a second copy that could
+// disagree with it.
+type ServiceStaff struct {
+	StaffIDs []string `json:"staff_ids"`
+}
+
 // Create handles POST /api/v1/tenants/{tenantID}/staff.
 //
 // The decode target carries exactly four fields. There is none for tenant_id,
@@ -199,4 +208,39 @@ func (h *StaffHandler) ReplaceCapabilities(writer http.ResponseWriter, request *
 		return
 	}
 	writeJSON(writer, http.StatusOK, StaffCapabilities{ServiceIDs: serviceIDs})
+}
+
+// ListServiceStaff handles GET /api/v1/tenants/{tenantID}/services/{serviceID}/staff.
+// ListCapabilities' service-side mirror (SC2) — the owner-facing "who can
+// currently perform this service" view.
+func (h *StaffHandler) ListServiceStaff(writer http.ResponseWriter, request *http.Request, tenantID string, serviceID string) {
+	staffIDs, err := h.staff.ListServiceStaff(request.Context(), tenantID, serviceID)
+	if err != nil {
+		writeSchedulingError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, ServiceStaff{StaffIDs: staffIDs})
+}
+
+// ReplaceServiceStaff handles PUT /api/v1/tenants/{tenantID}/services/{serviceID}/staff
+// (SC2). ReplaceCapabilities' service-side mirror: PUT because the body is
+// the complete set, and a missing or null staff_ids is an explicit empty set
+// — "this service currently has no assigned technicians" is a legitimate
+// state (e.g. a newly created service before any assignment), the same
+// reasoning ReplaceCapabilities applies to an empty service_ids.
+func (h *StaffHandler) ReplaceServiceStaff(writer http.ResponseWriter, request *http.Request, tenantID string, serviceID string) {
+	var input struct {
+		StaffIDs []string `json:"staff_ids"`
+	}
+	if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
+		writeSchedulingError(writer, apperrors.New(apperrors.CodeInvalidRequest, "invalid request", err))
+		return
+	}
+
+	staffIDs, err := h.staff.ReplaceServiceStaff(request.Context(), tenantID, serviceID, input.StaffIDs)
+	if err != nil {
+		writeSchedulingError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, ServiceStaff{StaffIDs: staffIDs})
 }

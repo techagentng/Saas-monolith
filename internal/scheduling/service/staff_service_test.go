@@ -150,6 +150,19 @@ func (r *fakeCapabilityRepository) DeleteAll(_ context.Context, _ string, staffI
 	return nil
 }
 
+func (r *fakeCapabilityRepository) DeleteAllForService(_ context.Context, _ string, serviceID string) error {
+	for staffID, ids := range r.assignments {
+		remaining := make([]string, 0, len(ids))
+		for _, id := range ids {
+			if id != serviceID {
+				remaining = append(remaining, id)
+			}
+		}
+		r.assignments[staffID] = remaining
+	}
+	return nil
+}
+
 func (r *fakeCapabilityRepository) Assign(_ context.Context, _ string, staffID string, serviceID string) error {
 	r.assignments[staffID] = append(r.assignments[staffID], serviceID)
 	return nil
@@ -618,6 +631,91 @@ func TestListCapabilitiesRejectsAnUnknownStaffMemberRatherThanReturningEmpty(t *
 	if fixture.capabilities.listCalls != 0 {
 		t.Fatal("ListCapabilities() queried capabilities for a profile that does not exist")
 	}
+}
+
+// --- SC2: ReplaceServiceStaff / ListServiceStaff (ReplaceCapabilities run the
+// other way round — staff assigned TO a service, not services a staff member
+// performs) -------------------------------------------------------------
+
+func TestReplaceServiceStaffRejectsAnUnknownService(t *testing.T) {
+	fixture := newStaffFixture(t, nil)
+
+	_, err := fixture.service.ReplaceServiceStaff(context.Background(), tenantA, otherServiceA, []string{staffID})
+	assertCode(t, err, apperrors.CodeServiceNotFound, "ReplaceServiceStaff(unknown service)")
+}
+
+func TestReplaceServiceStaffRejectsAServiceFromAnotherTenant(t *testing.T) {
+	fixture := newStaffFixture(t, nil)
+	// The service genuinely exists — under tenant B.
+	fixture.services.services[otherServiceA] = &model.Service{ID: otherServiceA, TenantID: tenantB, Name: "Rival Service", Status: model.StatusActive}
+
+	_, err := fixture.service.ReplaceServiceStaff(context.Background(), tenantA, otherServiceA, []string{staffID})
+	assertCode(t, err, apperrors.CodeServiceNotFound, "ReplaceServiceStaff(cross-tenant service)")
+	// nilTxBeginner would have errored differently had a transaction opened;
+	// reaching a not-found error proves the check happens first.
+}
+
+func TestReplaceServiceStaffRejectsAMalformedStaffID(t *testing.T) {
+	fixture := newStaffFixture(t, nil)
+	fixture.services.services[otherServiceA] = &model.Service{ID: otherServiceA, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
+
+	_, err := fixture.service.ReplaceServiceStaff(context.Background(), tenantA, otherServiceA, []string{"not-a-uuid"})
+	assertCode(t, err, apperrors.CodeValidationFailed, "ReplaceServiceStaff(malformed staff id)")
+}
+
+func TestReplaceServiceStaffRejectsAnUnknownStaffMember(t *testing.T) {
+	fixture := newStaffFixture(t, nil)
+	fixture.services.services[otherServiceA] = &model.Service{ID: otherServiceA, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
+
+	_, err := fixture.service.ReplaceServiceStaff(context.Background(), tenantA, otherServiceA, []string{staffID})
+	assertCode(t, err, apperrors.CodeValidationFailed, "ReplaceServiceStaff(unknown staff)")
+}
+
+func TestReplaceServiceStaffRejectsAnotherTenantsStaffMember(t *testing.T) {
+	fixture := newStaffFixture(t, nil)
+	fixture.services.services[otherServiceA] = &model.Service{ID: otherServiceA, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
+	fixture.staff.profiles[staffID] = &model.StaffProfile{ID: staffID, TenantID: tenantB, DisplayName: "Rival Ada", Status: model.StatusActive}
+
+	_, err := fixture.service.ReplaceServiceStaff(context.Background(), tenantA, otherServiceA, []string{staffID})
+	assertCode(t, err, apperrors.CodeValidationFailed, "ReplaceServiceStaff(cross-tenant staff)")
+}
+
+// The whole set is validated before anything is written, so an invalid member
+// anywhere in the list leaves the existing assignments untouched.
+func TestReplaceServiceStaffValidatesTheWholeSetBeforeWriting(t *testing.T) {
+	fixture := newStaffFixture(t, nil)
+	fixture.services.services[otherServiceA] = &model.Service{ID: otherServiceA, TenantID: tenantA, Name: "Gel Manicure", Status: model.StatusActive}
+	fixture.staff.profiles[staffID] = &model.StaffProfile{ID: staffID, TenantID: tenantA, DisplayName: "Ada", Status: model.StatusActive}
+	fixture.capabilities.assignments[staffID] = []string{otherServiceA}
+
+	// First entry valid, second belongs to another tenant.
+	const foreignStaffID = "550e8400-e29b-41d4-a716-446655448006"
+	fixture.staff.profiles[foreignStaffID] = &model.StaffProfile{ID: foreignStaffID, TenantID: tenantB, DisplayName: "Rival", Status: model.StatusActive}
+
+	_, err := fixture.service.ReplaceServiceStaff(context.Background(), tenantA, otherServiceA, []string{staffID, foreignStaffID})
+	if err == nil {
+		t.Fatal("ReplaceServiceStaff() accepted a set containing another tenant's staff member")
+	}
+
+	existing := fixture.capabilities.assignments[staffID]
+	if len(existing) != 1 || existing[0] != otherServiceA {
+		t.Fatalf("the previous assignment was disturbed by a rejected replacement: %v", existing)
+	}
+}
+
+func TestListServiceStaffRejectsAnUnknownServiceRatherThanReturningEmpty(t *testing.T) {
+	fixture := newStaffFixture(t, nil)
+
+	_, err := fixture.service.ListServiceStaff(context.Background(), tenantA, otherServiceA)
+	assertCode(t, err, apperrors.CodeServiceNotFound, "ListServiceStaff(unknown service)")
+}
+
+func TestListServiceStaffRejectsAServiceFromAnotherTenant(t *testing.T) {
+	fixture := newStaffFixture(t, nil)
+	fixture.services.services[otherServiceA] = &model.Service{ID: otherServiceA, TenantID: tenantB, Name: "Rival Service", Status: model.StatusActive}
+
+	_, err := fixture.service.ListServiceStaff(context.Background(), tenantA, otherServiceA)
+	assertCode(t, err, apperrors.CodeServiceNotFound, "ListServiceStaff(cross-tenant service)")
 }
 
 func strPtr(value string) *string { return &value }

@@ -30,6 +30,10 @@ const (
 	capServiceA = "550e8400-e29b-41d4-a716-446655452004"
 	capServiceB = "550e8400-e29b-41d4-a716-446655452005"
 	capServiceC = "550e8400-e29b-41d4-a716-446655452006"
+	// SC2: a second technician, for exercising ReplaceServiceStaff (assigning
+	// MULTIPLE staff to one service — ReplaceCapabilities' fixture only ever
+	// needed one staff member across multiple services).
+	capStaffB = "550e8400-e29b-41d4-a716-446655452007"
 )
 
 // openCapabilityTestDB rebuilds the full schema on the disposable Docker
@@ -125,6 +129,11 @@ func newCapabilityFixture(t *testing.T) *capabilityFixture {
 	}); err != nil {
 		t.Fatalf("seeding staff: %v", err)
 	}
+	if _, err := staffRepo.Create(ctx, &schedulingmodel.StaffProfile{
+		ID: capStaffB, TenantID: capTenantA, DisplayName: "Bola", IsBookable: true,
+	}); err != nil {
+		t.Fatalf("seeding staff: %v", err)
+	}
 	for _, seed := range []struct{ id, tenantID, name string }{
 		{capServiceA, capTenantA, "Manicure"},
 		{capServiceB, capTenantA, "Pedicure"},
@@ -150,10 +159,45 @@ func (alwaysActiveMembership) FindByTenantAndUser(_ context.Context, tenantID, u
 	return &tenantmodel.TenantMembership{TenantID: tenantID, UserID: userID, Status: tenantmodel.MembershipStatusActive}, nil
 }
 
+// seedStaff adds one more staff profile beyond the fixture's own default
+// roster — used by SC2 tests that need a staff member under a SPECIFIC
+// tenant (e.g. capTenantB, to prove cross-tenant rejection) that the shared
+// fixture does not seed by default.
+func (f *capabilityFixture) seedStaff(t *testing.T, id string, tenantID string, displayName string) {
+	t.Helper()
+	staffRepo := schedulingrepository.NewPostgresStaffRepository(f.db)
+	if _, err := staffRepo.Create(context.Background(), &schedulingmodel.StaffProfile{
+		ID: id, TenantID: tenantID, DisplayName: displayName, IsBookable: true,
+	}); err != nil {
+		t.Fatalf("seeding staff %s: %v", displayName, err)
+	}
+}
+
 func (f *capabilityFixture) storedCapabilities(t *testing.T) []string {
 	t.Helper()
 	rows, err := f.db.QueryContext(context.Background(),
 		"SELECT service_id FROM staff_services WHERE staff_id = $1 ORDER BY service_id", capStaffA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// storedServiceStaff is storedCapabilities run the other way round — the
+// staff ids currently assigned to one service, straight from the table.
+func (f *capabilityFixture) storedServiceStaff(t *testing.T, serviceID string) []string {
+	t.Helper()
+	rows, err := f.db.QueryContext(context.Background(),
+		"SELECT staff_id FROM staff_services WHERE service_id = $1 ORDER BY staff_id", serviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,5 +371,214 @@ func TestArchivingStaffKeepsCapabilityRows(t *testing.T) {
 	}
 	if profile.Status != schedulingmodel.StatusArchived {
 		t.Fatalf("Status = %q, want ARCHIVED", profile.Status)
+	}
+}
+
+// --- SC2: ReplaceServiceStaff / ListServiceStaff, the exact same table and
+// transaction shape as ReplaceCapabilities above, mirrored from the service
+// side (multiple staff assigned to ONE service, rather than one staff member
+// assigned to multiple services). ---------------------------------------
+
+func TestReplaceServiceStaffCommitsTheWholeSet(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+
+	result, err := fixture.service.ReplaceServiceStaff(context.Background(), capTenantA, capServiceA, []string{capStaffA, capStaffB})
+	if err != nil {
+		t.Fatalf("ReplaceServiceStaff() error = %v", err)
+	}
+	if len(result) != 2 {
+		t.Fatalf("returned %v, want both technicians", result)
+	}
+	if stored := fixture.storedServiceStaff(t, capServiceA); len(stored) != 2 {
+		t.Fatalf("persisted %v, want both technicians", stored)
+	}
+}
+
+// Replacement is a full-set operation: whatever is sent becomes the set —
+// exactly the semantics SC2's spec calls out (assigning ["Ada","Chiamaka"]
+// over a previous ["Ada","Bola"] result must drop Bola, not append).
+func TestReplaceServiceStaffReplacesRatherThanAppends(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+	ctx := context.Background()
+
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA, capStaffB}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffB}); err != nil {
+		t.Fatalf("second replacement error = %v", err)
+	}
+
+	stored := fixture.storedServiceStaff(t, capServiceA)
+	if len(stored) != 1 || stored[0] != capStaffB {
+		t.Fatalf("persisted %v, want exactly the second set", stored)
+	}
+}
+
+// Sending the same set twice changes nothing — the operation is idempotent.
+func TestReplaceServiceStaffIsIdempotent(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+	ctx := context.Background()
+
+	first, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA})
+	if err != nil {
+		t.Fatalf("repeating the same set error = %v", err)
+	}
+	if len(first) != len(second) || first[0] != second[0] {
+		t.Fatalf("idempotent replacement diverged: %v vs %v", first, second)
+	}
+}
+
+// An empty set is a legitimate state: a newly created service has no
+// technicians yet, and an owner may deliberately clear every assignment.
+func TestReplaceServiceStaffAcceptsAnEmptySet(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+	ctx := context.Background()
+
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA, capStaffB}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, nil)
+	if err != nil {
+		t.Fatalf("ReplaceServiceStaff(empty) error = %v", err)
+	}
+	if len(result) != 0 {
+		t.Fatalf("returned %v, want an empty set", result)
+	}
+	if stored := fixture.storedServiceStaff(t, capServiceA); len(stored) != 0 {
+		t.Fatalf("persisted %v, want none", stored)
+	}
+}
+
+func TestReplaceServiceStaffDeduplicatesARepeatedStaffMember(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+
+	result, err := fixture.service.ReplaceServiceStaff(context.Background(), capTenantA, capServiceA, []string{capStaffA, capStaffA, capStaffA})
+	if err != nil {
+		t.Fatalf("ReplaceServiceStaff() error = %v, want a duplicated entry tolerated", err)
+	}
+	if len(result) != 1 {
+		t.Fatalf("returned %v, want one row despite three mentions", result)
+	}
+}
+
+// THE ATOMICITY PROOF: a set naming another tenant's staff member must leave
+// the previous set completely intact — not partially applied, not cleared.
+func TestReplaceServiceStaffRollsBackEntirelyOnAnInvalidMember(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+	ctx := context.Background()
+	const rivalStaffID = "550e8400-e29b-41d4-a716-446655452008"
+	fixture.seedStaff(t, rivalStaffID, capTenantB, "Rival Technician")
+
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA, capStaffB}); err != nil {
+		t.Fatal(err)
+	}
+	before := fixture.storedServiceStaff(t, capServiceA)
+	if len(before) != 2 {
+		t.Fatalf("precondition: persisted %v, want two technicians", before)
+	}
+
+	// rivalStaffID belongs to tenant B. Placed LAST, after two valid entries,
+	// so a naive implementation that deleted and then inserted one at a time
+	// would already have destroyed the previous set by the time it failed.
+	_, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA, capStaffB, rivalStaffID})
+	if err == nil {
+		t.Fatal("ReplaceServiceStaff() accepted another tenant's staff member")
+	}
+	var appErr *apperrors.AppError
+	if !errors.As(err, &appErr) || appErr.Code != apperrors.CodeValidationFailed {
+		t.Fatalf("error = %v, want VALIDATION_FAILED", err)
+	}
+
+	after := fixture.storedServiceStaff(t, capServiceA)
+	if len(after) != 2 || after[0] != before[0] || after[1] != before[1] {
+		t.Fatalf("the previous assignment was disturbed by a rejected replacement:\n  before %v\n  after  %v", before, after)
+	}
+}
+
+func TestReplaceServiceStaffRollsBackOnAnUnknownStaffMember(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+	ctx := context.Background()
+
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA}); err != nil {
+		t.Fatal(err)
+	}
+
+	unknown := "550e8400-e29b-41d4-a716-446655459998"
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffB, unknown}); err == nil {
+		t.Fatal("ReplaceServiceStaff() accepted an unknown staff member")
+	}
+
+	stored := fixture.storedServiceStaff(t, capServiceA)
+	if len(stored) != 1 || stored[0] != capStaffA {
+		t.Fatalf("the previous set was disturbed: %v", stored)
+	}
+}
+
+// Removing a service's only technician must not touch that technician's OWN
+// unrelated capability rows for other services — DeleteAllForService is
+// scoped by service_id, not staff_id.
+func TestReplaceServiceStaffDoesNotDisturbTheStaffMembersOtherServices(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+	ctx := context.Background()
+
+	if _, err := fixture.service.ReplaceCapabilities(ctx, capTenantA, capStaffA, []string{capServiceA, capServiceB}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, nil); err != nil {
+		t.Fatalf("ReplaceServiceStaff(clear) error = %v", err)
+	}
+
+	remaining := fixture.storedCapabilities(t)
+	if len(remaining) != 1 || remaining[0] != capServiceB {
+		t.Fatalf("clearing capServiceA's technicians disturbed capStaffA's other capability: %v", remaining)
+	}
+}
+
+// THE INTEGRATION POINT WITH PUBLIC DISCOVERY (SC2 spec §19): the public
+// booking flow's technician list is ListStaffIDsForService run through
+// PublicStaffService — the exact same repository method ReplaceServiceStaff
+// reads back through. Proving that method reflects an assignment/removal
+// immediately proves the public endpoint will too, without re-standing up
+// the whole public HTTP stack here.
+func TestReplaceServiceStaffIsImmediatelyVisibleToPublicDiscovery(t *testing.T) {
+	fixture := newCapabilityFixture(t)
+	ctx := context.Background()
+	capabilityRepo := schedulingrepository.NewPostgresCapabilityRepository(fixture.db)
+
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA}); err != nil {
+		t.Fatal(err)
+	}
+	visible, err := capabilityRepo.ListStaffIDsForService(ctx, capTenantA, capServiceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visible) != 1 || visible[0] != capStaffA {
+		t.Fatalf("public discovery would see %v after assigning Ada, want [%s]", visible, capStaffA)
+	}
+
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, []string{capStaffA, capStaffB}); err != nil {
+		t.Fatal(err)
+	}
+	visible, err = capabilityRepo.ListStaffIDsForService(ctx, capTenantA, capServiceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visible) != 2 {
+		t.Fatalf("public discovery would see %v after adding Bola, want both", visible)
+	}
+
+	if _, err := fixture.service.ReplaceServiceStaff(ctx, capTenantA, capServiceA, nil); err != nil {
+		t.Fatal(err)
+	}
+	visible, err = capabilityRepo.ListStaffIDsForService(ctx, capTenantA, capServiceA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visible) != 0 {
+		t.Fatalf("public discovery would see %v after removing everyone, want none — this is the 'No technicians are currently available' case", visible)
 	}
 }

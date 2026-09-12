@@ -266,6 +266,16 @@ func (r *PostgresCapabilityRepository) DeleteAll(ctx context.Context, tenantID s
 	return nil
 }
 
+// DeleteAllForService is DeleteAll run the other way round — every staff
+// member assigned to one service, rather than every service one staff member
+// performs.
+func (r *PostgresCapabilityRepository) DeleteAllForService(ctx context.Context, tenantID string, serviceID string) error {
+	if _, err := r.db.ExecContext(ctx, "DELETE FROM staff_services WHERE service_id = $1 AND tenant_id = $2", serviceID, tenantID); err != nil {
+		return fmt.Errorf("clearing service staff assignments: %w", err)
+	}
+	return nil
+}
+
 // Assign records one capability row.
 //
 // A composite-foreign-key violation means the staff member or the service does
