@@ -7,6 +7,7 @@ import (
 	"time"
 
 	apperrors "github.com/techagentng/saas-monolith/internal/errors"
+	"github.com/techagentng/saas-monolith/internal/scheduling/availability"
 	"github.com/techagentng/saas-monolith/internal/scheduling/model"
 	"github.com/techagentng/saas-monolith/internal/scheduling/repository"
 	tenantmodel "github.com/techagentng/saas-monolith/internal/tenant/model"
@@ -18,14 +19,16 @@ const (
 	bmStaffID   = "550e8400-e29b-41d4-a716-4466554e0003"
 )
 
-// fakeBookingStore satisfies BookingReader and BookingCanceller over an
-// in-memory slice, and records the filter it was handed so the view->filter
-// translation can be asserted without a database.
+// fakeBookingStore satisfies BookingReader, BookingCanceller,
+// BookingRescheduler, and (S12-BE) OccupancyReader over an in-memory slice,
+// and records the filter it was handed so the view->filter translation can
+// be asserted without a database.
 type fakeBookingStore struct {
-	rows       []*repository.BookingWithRelations
-	lastFilter repository.BookingListFilter
-	lastTenant string
-	cancelErr  error
+	rows          []*repository.BookingWithRelations
+	lastFilter    repository.BookingListFilter
+	lastTenant    string
+	cancelErr     error
+	rescheduleErr error
 }
 
 func (f *fakeBookingStore) ListByTenant(_ context.Context, tenantID string, filter repository.BookingListFilter) ([]*repository.BookingWithRelations, error) {
@@ -77,6 +80,58 @@ func (f *fakeBookingStore) Cancel(_ context.Context, tenantID, bookingID string)
 	return nil, false, nil
 }
 
+// OccupiedIntervals (S12-BE) is fakeBookingStore's OccupancyReader half —
+// backing the REAL AvailabilityService bmFixture wires, so reschedule tests
+// exercise the actual S7 engine's occupancy/self-exclusion logic rather than
+// a canned slot list.
+func (f *fakeBookingStore) OccupiedIntervals(_ context.Context, tenantID, staffID string, from, to time.Time, excludeBookingID string) ([]availability.OccupiedInterval, error) {
+	var out []availability.OccupiedInterval
+	for _, r := range f.rows {
+		b := r.Booking
+		if b.ID == excludeBookingID {
+			continue
+		}
+		if b.TenantID == tenantID && b.StaffID == staffID && b.Status == model.BookingConfirmed &&
+			b.StartAt.Before(to) && b.EndAt.After(from) {
+			out = append(out, availability.OccupiedInterval{Start: b.StartAt, End: b.EndAt})
+		}
+	}
+	return out, nil
+}
+
+// UpdateSchedule (S12-BE) mirrors the real bookings_no_overlap exclusion
+// constraint exactly like statefulBookingRepository.UpdateSchedule in the
+// app package's route tests: a target interval overlapping another
+// CONFIRMED booking for the same staff member is rejected, but the row's
+// own prior interval is never treated as conflicting with itself.
+func (f *fakeBookingStore) UpdateSchedule(_ context.Context, tenantID, bookingID string, startAt, endAt time.Time) (*model.Booking, bool, error) {
+	if f.rescheduleErr != nil {
+		return nil, false, f.rescheduleErr
+	}
+	var target *repository.BookingWithRelations
+	for _, r := range f.rows {
+		if r.Booking.ID == bookingID && r.Booking.TenantID == tenantID && r.Booking.Status == model.BookingConfirmed {
+			target = r
+			break
+		}
+	}
+	if target == nil {
+		return nil, false, nil
+	}
+	for _, r := range f.rows {
+		if r.Booking.ID == bookingID || r.Booking.TenantID != tenantID || r.Booking.StaffID != target.Booking.StaffID || r.Booking.Status != model.BookingConfirmed {
+			continue
+		}
+		if startAt.Before(r.Booking.EndAt) && endAt.After(r.Booking.StartAt) {
+			return nil, false, apperrors.New(apperrors.CodeBookingSlotUnavailable, "the requested time is no longer available", nil)
+		}
+	}
+	target.Booking.StartAt, target.Booking.EndAt = startAt, endAt
+	target.Booking.UpdatedAt = time.Now().UTC()
+	copied := target.Booking
+	return &copied, true, nil
+}
+
 func bmRow(id, tenantID string, status model.BookingStatus, start time.Time, customer model.Customer) *repository.BookingWithRelations {
 	return &repository.BookingWithRelations{
 		Booking: model.Booking{
@@ -92,11 +147,269 @@ func bmFixture(now time.Time, rows ...*repository.BookingWithRelations) (*fakeBo
 	store := &fakeBookingStore{rows: rows}
 	lagos := "Africa/Lagos"
 	tenants := &fakeTenantReader{tenant: &tenantmodel.Tenant{ID: tenantA, Name: "Luxe Nails", Slug: "luxe-nails", Status: tenantmodel.StatusActive, Timezone: &lagos}}
-	svc := NewBookingManagementService(store, store, tenants, fixedClock{now: now})
+	// List/Get/Cancel never touch scheduling logic, so a nilAvailability that
+	// fails loudly if reached is itself a useful assertion for THOSE tests;
+	// the dedicated rescheduleFixture below wires the real engine.
+	svc := NewBookingManagementService(store, store, store, nilAvailability{}, newFakeServiceRepository(), tenants, fixedClock{now: now})
 	return store, tenants, svc
 }
 
+// nilAvailability panics if List/Get/Cancel's own tests ever accidentally
+// reach scheduling logic — they should not, since none of those three
+// operations validates or computes a slot.
+type nilAvailability struct{}
+
+func (nilAvailability) GetAvailability(context.Context, string, string, string, string) (*AvailabilityResult, error) {
+	panic("List/Get/Cancel must never reach the availability engine")
+}
+func (nilAvailability) GetAvailabilityExcludingBooking(context.Context, string, string, string, string, string) (*AvailabilityResult, error) {
+	panic("List/Get/Cancel must never reach the availability engine")
+}
+
 var bmNow = time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+
+// --- Reschedule (S12-BE) ------------------------------------------------
+
+// rescheduleFixture wires BookingManagementService over the REAL
+// AvailabilityService (S7), backed by fakes for service/staff/capability/
+// working-hours/occupancy — not a canned slot list — so these tests
+// genuinely exercise working-hours validation, capability revalidation, and
+// (critically) the self-conflict exclusion, reusing S7 exactly as
+// CreatePublicBooking does rather than re-implementing any of its rules.
+type rescheduleFixture struct {
+	store        *fakeBookingStore
+	tenants      *fakeTenantReader
+	services     *fakeServiceRepository
+	staff        *fakeStaffRepository
+	capabilities *fakeCapabilityRepository
+	hours        *fakeWorkingHoursRepository
+	svc          BookingManagementService
+}
+
+// rsTenant/rsService/rsStaff are distinct from bmServiceID/bmStaffID/tenantA
+// used by the List/Get/Cancel tests above, so the two fixtures never share
+// mutable fake state.
+const (
+	rsTenant  = "550e8400-e29b-41d4-a716-4466554e2001"
+	rsService = "550e8400-e29b-41d4-a716-4466554e2002"
+	rsStaff   = "550e8400-e29b-41d4-a716-4466554e2003"
+)
+
+func newRescheduleFixture(now time.Time, rows ...*repository.BookingWithRelations) *rescheduleFixture {
+	store := &fakeBookingStore{rows: rows}
+	lagos := "Africa/Lagos"
+	tenants := &fakeTenantReader{tenant: &tenantmodel.Tenant{ID: rsTenant, Name: "Luxe Nails", Slug: "luxe-nails", Status: tenantmodel.StatusActive, Timezone: &lagos}}
+
+	services := newFakeServiceRepository()
+	services.services[rsService] = &model.Service{ID: rsService, TenantID: rsTenant, Name: "Gel Manicure", DurationMinutes: 30, PriceMinor: 150000, Status: model.StatusActive}
+
+	staff := newFakeStaffRepository()
+	staff.profiles[rsStaff] = activeStaffProfile(rsStaff, rsTenant) // DisplayName "Ada"
+
+	capabilities := newFakeCapabilityRepository()
+	capabilities.assignments[rsStaff] = []string{rsService}
+
+	hours := newFakeWorkingHoursRepository()
+	for _, day := range []model.DayOfWeek{
+		model.Monday, model.Tuesday, model.Wednesday, model.Thursday, model.Friday, model.Saturday, model.Sunday,
+	} {
+		hours.byStaff[rsStaff] = append(hours.byStaff[rsStaff], &model.WorkingHourInterval{
+			ID: "wh-" + string(day), TenantID: rsTenant, StaffID: rsStaff, DayOfWeek: day, StartTime: "09:00", EndTime: "17:00",
+		})
+	}
+
+	engine := NewAvailabilityService(tenants, services, staff, capabilities, hours, store, fixedClock{now: now})
+	svc := NewBookingManagementService(store, store, store, engine, services, tenants, fixedClock{now: now})
+
+	return &rescheduleFixture{store: store, tenants: tenants, services: services, staff: staff, capabilities: capabilities, hours: hours, svc: svc}
+}
+
+// rsRow seeds one CONFIRMED booking for rsService/rsStaff under rsTenant.
+func rsRow(id string, status model.BookingStatus, start time.Time) *repository.BookingWithRelations {
+	return &repository.BookingWithRelations{
+		Booking: model.Booking{
+			ID: id, TenantID: rsTenant, ServiceID: rsService, StaffID: rsStaff,
+			Customer: model.Customer{Name: "Jane Doe", Phone: strPtr("+2348001112222")},
+			StartAt:  start, EndAt: start.Add(30 * time.Minute),
+			Status: status, CreatedAt: start.Add(-72 * time.Hour), UpdatedAt: start.Add(-72 * time.Hour),
+		},
+		ServiceName: "Gel Manicure", StaffName: "Ada", ServiceDurationMins: 30,
+	}
+}
+
+// rsNow is a Thursday. Every reschedule target below lands on a real future
+// weekday within the 09:00-17:00 Africa/Lagos (UTC+1, no DST) working
+// window the fixture seeds, unless a test deliberately picks one outside it.
+var rsNow = time.Date(2026, 9, 10, 8, 0, 0, 0, time.UTC) // 09:00 Africa/Lagos
+
+const rsBookingID = "550e8400-e29b-41d4-a716-4466554e2999"
+
+func TestRescheduleMovesAConfirmedBookingPreservingItsIdentity(t *testing.T) {
+	original := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)) // day+1, 10:00 Lagos
+	f := newRescheduleFixture(rsNow, original)
+
+	detail, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{
+		Date: "2026-09-14", Start: "10:00", // day+4, a Monday, 10:00 Lagos = 09:00 UTC
+	})
+	if err != nil {
+		t.Fatalf("Reschedule() error = %v", err)
+	}
+	if detail.ID != rsBookingID || detail.Reference != bookingReference(rsBookingID) {
+		t.Fatalf("identity not preserved: id=%q ref=%q", detail.ID, detail.Reference)
+	}
+	if detail.CustomerName != "Jane Doe" || detail.ServiceID != rsService || detail.StaffID != rsStaff {
+		t.Fatalf("customer/service/staff changed: %+v", detail)
+	}
+	wantStart := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
+	if !detail.StartAt.Equal(wantStart) || !detail.EndAt.Equal(wantStart.Add(30*time.Minute)) {
+		t.Fatalf("new time = %s - %s, want %s - %s", detail.StartAt, detail.EndAt, wantStart, wantStart.Add(30*time.Minute))
+	}
+	if len(f.store.rows) != 1 {
+		t.Fatalf("row count = %d, want 1 (no cancel-and-recreate)", len(f.store.rows))
+	}
+}
+
+func TestRescheduleRejectsACancelledBooking(t *testing.T) {
+	cancelled := rsRow(rsBookingID, model.BookingCancelled, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+	f := newRescheduleFixture(rsNow, cancelled)
+
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "10:00"})
+	assertCode(t, err, apperrors.CodeValidationFailed, "reschedule a cancelled booking")
+	if !f.store.rows[0].Booking.StartAt.Equal(time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)) {
+		t.Fatal("a rejected reschedule mutated the booking")
+	}
+}
+
+func TestRescheduleToTheCurrentSlotIsANoOpSuccess(t *testing.T) {
+	start := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC) // 10:00 Lagos
+	original := rsRow(rsBookingID, model.BookingConfirmed, start)
+	f := newRescheduleFixture(rsNow, original)
+
+	detail, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-11", Start: "10:00"})
+	if err != nil {
+		t.Fatalf("rescheduling to the current slot should succeed as a no-op: %v", err)
+	}
+	if !detail.StartAt.Equal(start) {
+		t.Fatalf("StartAt = %s, want unchanged %s", detail.StartAt, start)
+	}
+}
+
+// THE SELF-CONFLICT PROOF (S12-BE section 10): the target overlaps the
+// booking's OWN current interval. Without excluding the booking's own row
+// from occupancy, this would incorrectly report BOOKING_SLOT_UNAVAILABLE.
+//
+// availability.Generate steps candidates on a fixed grid (the service
+// duration, from the working-hours start) — a booking's own stored interval
+// is therefore only ever OFF that grid if working hours changed since it was
+// made (a real, if uncommon, scenario: the owner edits the schedule after
+// bookings already exist). That is simulated here by shifting the day's
+// start from 09:00 to 09:15 AFTER seeding the original 10:00-10:30 booking,
+// producing a new grid (09:15, 09:45, 10:15, ...) whose 10:15 candidate
+// partially overlaps the old interval by 15 minutes — a genuine self-overlap
+// a naive implementation would incorrectly reject.
+func TestRescheduleExcludesItsOwnCurrentIntervalFromSelfConflict(t *testing.T) {
+	start := time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC) // 10:00-10:30 Lagos
+	original := rsRow(rsBookingID, model.BookingConfirmed, start)
+	f := newRescheduleFixture(rsNow, original)
+	f.hours.byStaff[rsStaff] = []*model.WorkingHourInterval{
+		{ID: "wh-fri", TenantID: rsTenant, StaffID: rsStaff, DayOfWeek: model.Friday, StartTime: "09:15", EndTime: "17:00"},
+	}
+
+	// 10:15-10:45 Lagos overlaps the current 10:00-10:30 by 15 minutes.
+	detail, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-11", Start: "10:15"})
+	if err != nil {
+		t.Fatalf("a booking must not conflict with its own current interval: %v", err)
+	}
+	want := time.Date(2026, 9, 11, 9, 15, 0, 0, time.UTC)
+	if !detail.StartAt.Equal(want) {
+		t.Fatalf("StartAt = %s, want %s", detail.StartAt, want)
+	}
+}
+
+func TestRescheduleRejectsAConflictWithAnotherConfirmedBooking(t *testing.T) {
+	moving := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+	blocking := rsRow("550e8400-e29b-41d4-a716-4466554e2998", model.BookingConfirmed, time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)) // 10:00 Lagos on the target day
+	f := newRescheduleFixture(rsNow, moving, blocking)
+
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "10:00"})
+	assertCode(t, err, apperrors.CodeBookingSlotUnavailable, "conflicting target slot")
+	if !f.store.rows[0].Booking.StartAt.Equal(time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)) {
+		t.Fatal("a rejected reschedule mutated the booking's original time")
+	}
+}
+
+func TestRescheduleRejectsAPastTarget(t *testing.T) {
+	original := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC))
+	f := newRescheduleFixture(rsNow, original) // rsNow = 2026-09-10 09:00 Lagos
+
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-09", Start: "10:00"})
+	assertCode(t, err, apperrors.CodeBookingSlotUnavailable, "past target")
+}
+
+func TestRescheduleRejectsATargetOutsideWorkingHours(t *testing.T) {
+	original := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+	f := newRescheduleFixture(rsNow, original)
+
+	// 20:00 Lagos is outside the fixture's 09:00-17:00 window.
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "20:00"})
+	assertCode(t, err, apperrors.CodeBookingSlotUnavailable, "outside working hours")
+}
+
+func TestRescheduleRejectsWhenTheStaffMemberNoLongerPerformsTheService(t *testing.T) {
+	original := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+	f := newRescheduleFixture(rsNow, original)
+	f.capabilities.assignments[rsStaff] = nil // the assignment was removed since the original booking
+
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "10:00"})
+	assertCode(t, err, apperrors.CodeValidationFailed, "staff no longer capable")
+}
+
+func TestRescheduleRejectsAMalformedDate(t *testing.T) {
+	original := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+	f := newRescheduleFixture(rsNow, original)
+
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "14-09-2026", Start: "10:00"})
+	assertCode(t, err, apperrors.CodeValidationFailed, "malformed date")
+}
+
+func TestRescheduleRejectsAMalformedStart(t *testing.T) {
+	original := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+	f := newRescheduleFixture(rsNow, original)
+
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "10am"})
+	assertCode(t, err, apperrors.CodeValidationFailed, "malformed start")
+}
+
+func TestRescheduleUnknownBookingIsNotFound(t *testing.T) {
+	f := newRescheduleFixture(rsNow)
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "10:00"})
+	assertCode(t, err, apperrors.CodeBookingNotFound, "unknown booking")
+}
+
+func TestRescheduleCrossTenantBookingIsNotFound(t *testing.T) {
+	foreign := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+	foreign.Booking.TenantID = tenantB
+	f := newRescheduleFixture(rsNow, foreign)
+
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "10:00"})
+	assertCode(t, err, apperrors.CodeBookingNotFound, "cross-tenant reschedule")
+}
+
+// THE ROLLBACK PROOF (S12-BE section 26): a failure in the final write step
+// must leave the booking's original time completely unchanged.
+func TestRescheduleLeavesTheOriginalTimeUnchangedWhenTheWriteFails(t *testing.T) {
+	original := rsRow(rsBookingID, model.BookingConfirmed, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+	f := newRescheduleFixture(rsNow, original)
+	f.store.rescheduleErr = apperrors.New(apperrors.CodeInternalError, "simulated write failure", nil)
+
+	_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "10:00"})
+	if err == nil {
+		t.Fatal("expected the forced write failure to propagate")
+	}
+	if !f.store.rows[0].Booking.StartAt.Equal(time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC)) {
+		t.Fatal("the original booking time changed despite the write failing")
+	}
+}
 
 // --- List: view -> filter translation ---------------------------------
 

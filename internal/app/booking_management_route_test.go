@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/techagentng/saas-monolith/internal/authorization"
 	authzservice "github.com/techagentng/saas-monolith/internal/authorization/service"
 	identityservice "github.com/techagentng/saas-monolith/internal/identity/service"
+	"github.com/techagentng/saas-monolith/internal/scheduling/availability"
 	schedulinghandler "github.com/techagentng/saas-monolith/internal/scheduling/handler"
 	schedulingmodel "github.com/techagentng/saas-monolith/internal/scheduling/model"
 	schedulingservice "github.com/techagentng/saas-monolith/internal/scheduling/service"
@@ -51,7 +53,33 @@ func bmRouteBooking(id, tenantID string, status schedulingmodel.BookingStatus, s
 	}
 }
 
-func buildBookingManagementRoutes(t *testing.T, scenario *staffScenarioState, tenantPermissions []string, bookings ...*schedulingmodel.Booking) (http.Handler, *identityservice.TokenManager, *statefulBookingRepository) {
+// fakeRouteAvailability is a minimal AvailabilityService for this file's
+// route tests. This file's own purpose (per the doc comment above) is
+// proving HTTP/permission/tenant-isolation wiring, not scheduling
+// correctness — the real S7 engine's own rules (working hours, capability,
+// DST, the self-conflict exclusion) are proven by
+// booking_management_service_test.go's unit tests and the real-database S12-BE
+// integration test, so a controllable fake is the right level of
+// abstraction here, exactly like fakeBookingService already is for the S10
+// public-booking route tests in a different file.
+type fakeRouteAvailability struct {
+	result        *schedulingservice.AvailabilityResult
+	err           error
+	lastExcludeID string
+	excludeCalls  int
+}
+
+func (f *fakeRouteAvailability) GetAvailability(context.Context, string, string, string, string) (*schedulingservice.AvailabilityResult, error) {
+	return f.result, f.err
+}
+
+func (f *fakeRouteAvailability) GetAvailabilityExcludingBooking(_ context.Context, _ string, _ string, _ string, _ string, excludeBookingID string) (*schedulingservice.AvailabilityResult, error) {
+	f.excludeCalls++
+	f.lastExcludeID = excludeBookingID
+	return f.result, f.err
+}
+
+func buildBookingManagementRoutes(t *testing.T, scenario *staffScenarioState, tenantPermissions []string, bookings ...*schedulingmodel.Booking) (http.Handler, *identityservice.TokenManager, *statefulBookingRepository, *fakeRouteAvailability) {
 	t.Helper()
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -71,7 +99,13 @@ func buildBookingManagementRoutes(t *testing.T, scenario *staffScenarioState, te
 		services: scenario.services,
 		profiles: scenario.profiles,
 	}
-	svc := schedulingservice.NewBookingManagementService(store, store, tenants, frozenClock{now: bmRouteNow})
+	availability := &fakeRouteAvailability{}
+	services := &statefulServiceRepository{services: scenario.services}
+	svc := schedulingservice.NewBookingManagementService(
+		store, store, store,
+		availability, services,
+		tenants, frozenClock{now: bmRouteNow},
+	)
 	handler := schedulinghandler.NewBookingManagementHandler(svc)
 
 	wrap := func(permission string, next http.HandlerFunc) http.Handler {
@@ -90,7 +124,10 @@ func buildBookingManagementRoutes(t *testing.T, scenario *staffScenarioState, te
 	mux.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/cancel", wrap("booking.update", func(w http.ResponseWriter, r *http.Request) {
 		handler.Cancel(w, r, r.PathValue("tenantID"), r.PathValue("bookingID"))
 	}))
-	return mux, tokens, store
+	mux.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/reschedule", wrap("booking.update", func(w http.ResponseWriter, r *http.Request) {
+		handler.Reschedule(w, r, r.PathValue("tenantID"), r.PathValue("bookingID"))
+	}))
+	return mux, tokens, store, availability
 }
 
 var bmRouteNow = time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
@@ -112,7 +149,7 @@ func bookingsPath(tenantID string) string { return "/api/v1/tenants/" + tenantID
 // --- auth + permission -------------------------------------------------
 
 func TestBookingRoutesRequireAuthentication(t *testing.T) {
-	handler, _, _ := buildBookingManagementRoutes(t, bookingScenario(t), bookingManagePermissions)
+	handler, _, _, _ := buildBookingManagementRoutes(t, bookingScenario(t), bookingManagePermissions)
 	for _, tc := range []struct{ method, path string }{
 		{http.MethodGet, bookingsPath(staffRouteTenantA)},
 		{http.MethodGet, bookingsPath(staffRouteTenantA) + "/" + bmRouteBookingA},
@@ -128,7 +165,7 @@ func TestBookingRoutesRequireAuthentication(t *testing.T) {
 
 func TestBookingListRequiresBookingReadPermission(t *testing.T) {
 	scenario := bookingScenario(t)
-	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, []string{"tenant.read"}) // no booking.*
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, []string{"tenant.read"}) // no booking.*
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA), ""))
@@ -143,7 +180,7 @@ func TestBookingListRequiresBookingReadPermission(t *testing.T) {
 func TestStaffRoleCanReadBookingsButNotCancel(t *testing.T) {
 	scenario := bookingScenario(t)
 	booking := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
-	handler, tokens, store := buildBookingManagementRoutes(t, scenario, bookingReadPermissions, booking)
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingReadPermissions, booking)
 
 	listRec := httptest.NewRecorder()
 	handler.ServeHTTP(listRec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA), ""))
@@ -169,7 +206,7 @@ func TestBookingListReturnsOnlyThisTenantsBookingsForTheView(t *testing.T) {
 	scenario.otherTenant = &tenantmodel.Tenant{ID: staffRouteTenantB, Name: "Rival", Slug: "rival", Status: tenantmodel.StatusActive}
 	upcoming := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
 	otherTenant := bmRouteBooking(bmRouteBookingB, staffRouteTenantB, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
-	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, upcoming, otherTenant)
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, upcoming, otherTenant)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=upcoming", ""))
@@ -192,7 +229,7 @@ func TestBookingListCancelledView(t *testing.T) {
 	scenario := bookingScenario(t)
 	confirmed := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
 	cancelled := bmRouteBooking(bmRouteBookingB, staffRouteTenantA, schedulingmodel.BookingCancelled, bmRouteNow.Add(-24*time.Hour))
-	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, confirmed, cancelled)
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, confirmed, cancelled)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=cancelled", ""))
@@ -213,7 +250,7 @@ func TestBookingListDateFilterUsesTheTenantsCalendarDayNotUTC(t *testing.T) {
 		time.Date(2026, 9, 6, 23, 30, 0, 0, time.UTC)) // 2026-09-07 00:30 Africa/Lagos
 	differentDay := bmRouteBooking(bmRouteBookingB, staffRouteTenantA, schedulingmodel.BookingConfirmed,
 		time.Date(2026, 9, 8, 10, 0, 0, 0, time.UTC)) // 2026-09-08 11:00 Africa/Lagos
-	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, sameLagosDay, differentDay)
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, sameLagosDay, differentDay)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=all&date=2026-09-07", ""))
@@ -230,7 +267,7 @@ func TestBookingListDateFilterUsesTheTenantsCalendarDayNotUTC(t *testing.T) {
 }
 
 func TestBookingListRejectsAnInvalidDateFilter(t *testing.T) {
-	handler, tokens, _ := buildBookingManagementRoutes(t, bookingScenario(t), bookingManagePermissions)
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, bookingScenario(t), bookingManagePermissions)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=all&date=07-09-2026", ""))
 	if rec.Code != http.StatusBadRequest {
@@ -246,7 +283,7 @@ func TestBookingListFiltersByStaffAndService(t *testing.T) {
 	forA := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
 	forOther := bmRouteBooking(bmRouteBookingB, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(25*time.Hour))
 	forOther.StaffID = otherStaff
-	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, forA, forOther)
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, forA, forOther)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=all&staff_id="+staffRouteStaffA, ""))
@@ -266,7 +303,7 @@ func TestBookingListFiltersByStaffAndService(t *testing.T) {
 }
 
 func TestBookingListRejectsInvalidView(t *testing.T) {
-	handler, tokens, _ := buildBookingManagementRoutes(t, bookingScenario(t), bookingManagePermissions)
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, bookingScenario(t), bookingManagePermissions)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=sideways", ""))
 	if rec.Code != http.StatusBadRequest {
@@ -280,7 +317,7 @@ func TestBookingListRejectsInvalidView(t *testing.T) {
 func TestBookingDetailReturnsBooking(t *testing.T) {
 	scenario := bookingScenario(t)
 	booking := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
-	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, booking)
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, booking)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA, ""))
@@ -298,7 +335,7 @@ func TestBookingDetailCrossTenantIsIndistinguishableFromMissing(t *testing.T) {
 	scenario := bookingScenario(t)
 	// booking exists, but under tenant B.
 	elsewhere := bmRouteBooking(bmRouteBookingA, staffRouteTenantB, schedulingmodel.BookingConfirmed, bmRouteNow)
-	handler, tokens, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, elsewhere)
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, elsewhere)
 
 	existsElsewhere := httptest.NewRecorder()
 	handler.ServeHTTP(existsElsewhere, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA, ""))
@@ -319,7 +356,7 @@ func TestBookingDetailCrossTenantIsIndistinguishableFromMissing(t *testing.T) {
 func TestBookingCancelTransitionsAndKeepsTheRow(t *testing.T) {
 	scenario := bookingScenario(t)
 	booking := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
-	handler, tokens, store := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, booking)
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, booking)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/cancel", ""))
@@ -344,7 +381,7 @@ func TestBookingCancelTransitionsAndKeepsTheRow(t *testing.T) {
 func TestBookingCancelCrossTenantIsNotFound(t *testing.T) {
 	scenario := bookingScenario(t)
 	elsewhere := bmRouteBooking(bmRouteBookingA, staffRouteTenantB, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
-	handler, tokens, store := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, elsewhere)
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, elsewhere)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/cancel", ""))
@@ -355,4 +392,119 @@ func TestBookingCancelCrossTenantIsNotFound(t *testing.T) {
 	if store.bookings[0].Status != schedulingmodel.BookingConfirmed {
 		t.Fatal("a cross-tenant cancel mutated another tenant's booking")
 	}
+}
+
+// --- reschedule ----------------------------------------------------
+
+func rescheduleBody(date, start string) string {
+	b, _ := json.Marshal(map[string]string{"date": date, "start": start})
+	return string(b)
+}
+
+// TestBookingRescheduleMovesBookingAndReturnsUpdatedDetail proves the full
+// HTTP wire-up: request body parsing, the handler asking the availability
+// engine to EXCLUDE this booking's own id (the self-conflict fix), and the
+// response reusing the exact same booking-detail DTO List/Get/Cancel use.
+func TestBookingRescheduleMovesBookingAndReturnsUpdatedDetail(t *testing.T) {
+	scenario := bookingScenario(t)
+	original := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
+	handler, tokens, store, avail := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, original)
+	avail.result = &schedulingservice.AvailabilityResult{
+		Date: "2026-09-12", Timezone: "Africa/Lagos", ServiceID: staffRouteServiceA, StaffID: staffRouteStaffA,
+		Slots: []availability.Slot{{Start: "14:00", End: "14:30"}},
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost,
+		bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/reschedule", rescheduleBody("2026-09-12", "14:00")))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if avail.excludeCalls != 1 || avail.lastExcludeID != bmRouteBookingA {
+		t.Fatalf("excludeCalls = %d, lastExcludeID = %q, want 1 call excluding %q", avail.excludeCalls, avail.lastExcludeID, bmRouteBookingA)
+	}
+	lagos, _ := time.LoadLocation("Africa/Lagos")
+	wantStart := time.Date(2026, 9, 12, 14, 0, 0, 0, lagos)
+	if !store.bookings[0].StartAt.Equal(wantStart) {
+		t.Fatalf("persisted start = %s, want %s", store.bookings[0].StartAt, wantStart)
+	}
+	if !strings.Contains(rec.Body.String(), `"id":"`+bmRouteBookingA+`"`) || !strings.Contains(rec.Body.String(), `"status":"CONFIRMED"`) {
+		t.Fatalf("body = %s, want the same booking-detail DTO shape List/Get/Cancel use", rec.Body.String())
+	}
+}
+
+func TestBookingRescheduleRequiresBookingUpdatePermission(t *testing.T) {
+	scenario := bookingScenario(t)
+	original := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingReadPermissions, original)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost,
+		bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/reschedule", rescheduleBody("2026-09-12", "14:00")))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 without booking.update", rec.Code)
+	}
+	assertBodyCode(t, rec, "PERMISSION_DENIED")
+	if store.bookings[0].StartAt != original.StartAt {
+		t.Fatal("a denied reschedule still mutated the booking")
+	}
+}
+
+func TestBookingRescheduleCrossTenantIsNotFound(t *testing.T) {
+	scenario := bookingScenario(t)
+	elsewhere := bmRouteBooking(bmRouteBookingA, staffRouteTenantB, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
+	handler, tokens, store, avail := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, elsewhere)
+	avail.result = &schedulingservice.AvailabilityResult{Timezone: "Africa/Lagos", Slots: []availability.Slot{{Start: "14:00", End: "14:30"}}}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost,
+		bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/reschedule", rescheduleBody("2026-09-12", "14:00")))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	assertBodyCode(t, rec, "BOOKING_NOT_FOUND")
+	if store.bookings[0].StartAt != elsewhere.StartAt {
+		t.Fatal("a cross-tenant reschedule mutated another tenant's booking")
+	}
+}
+
+// TestBookingRescheduleRejectsATargetThatIsNotAnAvailableSlot proves the
+// handler trusts the S7 availability engine as sole authority: a target that
+// engine does not offer is BOOKING_SLOT_UNAVAILABLE (409), never a silent
+// acceptance of an arbitrary client-supplied time.
+func TestBookingRescheduleRejectsATargetThatIsNotAnAvailableSlot(t *testing.T) {
+	scenario := bookingScenario(t)
+	original := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
+	handler, tokens, store, avail := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, original)
+	avail.result = &schedulingservice.AvailabilityResult{Timezone: "Africa/Lagos", Slots: []availability.Slot{{Start: "09:00", End: "09:30"}}}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost,
+		bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/reschedule", rescheduleBody("2026-09-12", "14:00")))
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s, want 409", rec.Code, rec.Body.String())
+	}
+	assertBodyCode(t, rec, "BOOKING_SLOT_UNAVAILABLE")
+	if store.bookings[0].StartAt != original.StartAt {
+		t.Fatal("a rejected reschedule still mutated the booking")
+	}
+}
+
+func TestBookingRescheduleRejectsAMalformedBody(t *testing.T) {
+	scenario := bookingScenario(t)
+	original := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(24*time.Hour))
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, original)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost,
+		bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/reschedule", "{not json"))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	assertBodyCode(t, rec, "INVALID_REQUEST")
 }

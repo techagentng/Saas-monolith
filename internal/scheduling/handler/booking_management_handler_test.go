@@ -14,12 +14,13 @@ import (
 )
 
 type fakeBookingManagementService struct {
-	tenantID  string
-	bookingID string
-	filter    service.BookingListFilter
-	list      []service.BookingSummary
-	detail    *service.BookingDetail
-	err       error
+	tenantID        string
+	bookingID       string
+	filter          service.BookingListFilter
+	rescheduleInput service.RescheduleBookingInput
+	list            []service.BookingSummary
+	detail          *service.BookingDetail
+	err             error
 }
 
 func (f *fakeBookingManagementService) List(_ context.Context, tenantID string, filter service.BookingListFilter) ([]service.BookingSummary, error) {
@@ -34,6 +35,11 @@ func (f *fakeBookingManagementService) Get(_ context.Context, tenantID, bookingI
 
 func (f *fakeBookingManagementService) Cancel(_ context.Context, tenantID, bookingID string) (*service.BookingDetail, error) {
 	f.tenantID, f.bookingID = tenantID, bookingID
+	return f.detail, f.err
+}
+
+func (f *fakeBookingManagementService) Reschedule(_ context.Context, tenantID, bookingID string, input service.RescheduleBookingInput) (*service.BookingDetail, error) {
+	f.tenantID, f.bookingID, f.rescheduleInput = tenantID, bookingID, input
 	return f.detail, f.err
 }
 

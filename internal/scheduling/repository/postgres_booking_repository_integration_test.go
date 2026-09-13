@@ -94,7 +94,7 @@ func TestBookingRepositoryCreateRoundTrips(t *testing.T) {
 
 	from := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
 	to := from.AddDate(0, 0, 1)
-	occ, err := repo.OccupiedIntervals(ctx, bkTenantA, bkStaffA, from, to)
+	occ, err := repo.OccupiedIntervals(ctx, bkTenantA, bkStaffA, from, to, "")
 	if err != nil {
 		t.Fatalf("OccupiedIntervals() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestBookingRepositoryOccupancyIsTenantAndStaffScopedAndHalfOpen(t *testing.
 	// A window that ends exactly when the booking starts must not see it
 	// (half-open overlap).
 	before, err := repo.OccupiedIntervals(ctx, bkTenantA, bkStaffA,
-		time.Date(2026, 9, 7, 9, 0, 0, 0, time.UTC), time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC))
+		time.Date(2026, 9, 7, 9, 0, 0, 0, time.UTC), time.Date(2026, 9, 7, 10, 0, 0, 0, time.UTC), "")
 	if err != nil {
 		t.Fatalf("OccupiedIntervals() error = %v", err)
 	}
@@ -126,7 +126,7 @@ func TestBookingRepositoryOccupancyIsTenantAndStaffScopedAndHalfOpen(t *testing.
 
 	// A different staff member's window sees nothing.
 	other, err := repo.OccupiedIntervals(ctx, bkTenantA, bkStaffB,
-		time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC))
+		time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC), time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC), "")
 	if err != nil {
 		t.Fatalf("OccupiedIntervals() error = %v", err)
 	}
@@ -346,7 +346,7 @@ func TestBookingRepositoryCancelReopensOccupancy(t *testing.T) {
 	from := time.Date(2026, 9, 7, 0, 0, 0, 0, time.UTC)
 	to := from.AddDate(0, 0, 1)
 
-	occ, _ := repo.OccupiedIntervals(ctx, bkTenantA, bkStaffA, from, to)
+	occ, _ := repo.OccupiedIntervals(ctx, bkTenantA, bkStaffA, from, to, "")
 	if len(occ) != 1 {
 		t.Fatalf("before cancel: occupied = %d, want 1", len(occ))
 	}
@@ -355,7 +355,7 @@ func TestBookingRepositoryCancelReopensOccupancy(t *testing.T) {
 		t.Fatalf("cancel: %v", err)
 	}
 
-	occ, _ = repo.OccupiedIntervals(ctx, bkTenantA, bkStaffA, from, to)
+	occ, _ = repo.OccupiedIntervals(ctx, bkTenantA, bkStaffA, from, to, "")
 	if len(occ) != 0 {
 		t.Fatalf("after cancel: occupied = %d, want 0 — the slot must be free again", len(occ))
 	}

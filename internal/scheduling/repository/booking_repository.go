@@ -77,8 +77,10 @@ type BookingRepository interface {
 	// indexed, tenant- and staff-scoped query — never a load-all-and-filter.
 	// It is the concrete backing for the S7 OccupancyReader seam, and only
 	// CONFIRMED bookings occupy time, so a CANCELLED booking is invisible here
-	// with no scheduling-layer change.
-	OccupiedIntervals(ctx context.Context, tenantID string, staffID string, from time.Time, to time.Time) ([]availability.OccupiedInterval, error)
+	// with no scheduling-layer change. excludeBookingID (S12-BE), when
+	// non-empty, omits that one booking's own row — see the implementation's
+	// doc comment for why reschedule needs this.
+	OccupiedIntervals(ctx context.Context, tenantID string, staffID string, from time.Time, to time.Time, excludeBookingID string) ([]availability.OccupiedInterval, error)
 
 	// ListByTenant returns the tenant's bookings matching filter, joined to
 	// service and technician names, ordered by start_at ascending. Filtered
@@ -107,4 +109,18 @@ type BookingRepository interface {
 	// id exists in this tenant (missing, cross-tenant, or already cancelled) —
 	// the service disambiguates those. It never deletes.
 	Cancel(ctx context.Context, tenantID string, bookingID string) (booking *model.Booking, updated bool, err error)
+
+	// UpdateSchedule (S12-BE) moves a CONFIRMED booking to a new start/end,
+	// scoped by id, tenant_id, AND status = 'CONFIRMED' — the same
+	// defense-in-depth WHERE-clause shape Cancel uses. Same
+	// (updated=false, nil, nil) convention for "no such CONFIRMED row"
+	// (missing, cross-tenant, or concurrently no longer CONFIRMED); the
+	// service layer has already read the booking once and knows which case
+	// applies. A target interval overlapping another CONFIRMED booking for
+	// the same staff member surfaces as BOOKING_SLOT_UNAVAILABLE, via the
+	// same bookings_no_overlap exclusion constraint Create relies on —
+	// Postgres never treats a row's own prior interval as conflicting with
+	// its own UPDATE, so no self-exclusion is needed at this layer (only in
+	// the availability CHECK beforehand, which reads other rows).
+	UpdateSchedule(ctx context.Context, tenantID string, bookingID string, startAt time.Time, endAt time.Time) (booking *model.Booking, updated bool, err error)
 }

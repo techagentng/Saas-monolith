@@ -241,6 +241,35 @@ func TestGetReceiptUsesTheServicesCurrentPriceNotAHistoricalSnapshot(t *testing.
 	}
 }
 
+// TestGetReceiptReflectsARescheduledBookingsNewTime is the S12-BE section 30
+// receipt-compatibility proof: Reschedule (BookingManagementService) writes
+// only start_at/end_at on the SAME booking row — id, reference and
+// receipt_access_token are all untouched — so the receipt, which always
+// re-reads the booking by token, reflects the new schedule with no change to
+// this service at all.
+func TestGetReceiptReflectsARescheduledBookingsNewTime(t *testing.T) {
+	f := newReceiptFixture()
+	_, reference := f.confirmedBooking()
+
+	// Simulate what BookingManagementService.Reschedule's UpdateSchedule call
+	// does at the repository layer: move start_at/end_at on the existing row,
+	// touching nothing else.
+	booking := f.bookings.bookings[receiptToken]
+	booking.StartAt = mustParseInstant("2026-09-27T15:00:00Z") // 16:00 Africa/Lagos
+	booking.EndAt = mustParseInstant("2026-09-27T15:45:00Z")
+
+	if _, err := f.svc.GetReceipt(context.Background(), "glamour-nails", reference, receiptToken); err != nil {
+		t.Fatalf("GetReceipt() error = %v", err)
+	}
+	data := f.generator.got
+	if data.Reference != reference {
+		t.Fatalf("Reference = %q, want %q (unchanged by reschedule)", data.Reference, reference)
+	}
+	if data.Date != "2026-09-27" || data.Start != "16:00" || data.End != "16:45" {
+		t.Fatalf("rescheduled schedule fields wrong: %+v, want date=2026-09-27 start=16:00 end=16:45", data)
+	}
+}
+
 func TestGetReceiptPropagatesAGeneratorFailureAsInternalError(t *testing.T) {
 	f := newReceiptFixture()
 	_, reference := f.confirmedBooking()

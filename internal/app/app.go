@@ -248,8 +248,14 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// with no change to the engine. booking.read / booking.update (migration
 	// 000017) gate the routes; SystemClock splits Upcoming from Past on
 	// absolute start_at.
+	//
+	// S12-BE reschedule reuses the SAME availabilityService and
+	// serviceRepository the public S10 booking-creation path already
+	// depends on (see bookingService above) — no second scheduling pipeline.
 	bookingManagementService := schedulingservice.NewBookingManagementService(
-		bookingRepository, bookingRepository, tenants, schedulingservice.SystemClock{},
+		bookingRepository, bookingRepository, bookingRepository,
+		availabilityService, serviceRepository,
+		tenants, schedulingservice.SystemClock{},
 	)
 	bookingManagementHandler := schedulinghandler.NewBookingManagementHandler(bookingManagementService)
 
@@ -721,13 +727,16 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	)))
 
 	// Scheduling S11 owner booking management (tenant-management / dashboard):
-	//   GET  /api/v1/tenants/{tenantID}/bookings                       TENANT  booking.read
-	//        ?view=upcoming|past|cancelled|all&staff_id=...&service_id=...
-	//   GET  /api/v1/tenants/{tenantID}/bookings/{bookingID}           TENANT  booking.read
-	//   POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/cancel    TENANT  booking.update
+	//   GET  /api/v1/tenants/{tenantID}/bookings                          TENANT  booking.read
+	//        ?view=upcoming|past|cancelled|all&staff_id=...&service_id=...&date=YYYY-MM-DD
+	//   GET  /api/v1/tenants/{tenantID}/bookings/{bookingID}              TENANT  booking.read
+	//   POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/cancel       TENANT  booking.update
+	//   POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/reschedule   TENANT  booking.update
 	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
-	// Cancellation carries booking.update, not a bespoke code: it changes a
-	// booking's state, and there is deliberately no booking.cancel permission.
+	// Cancellation and rescheduling both carry booking.update, not a bespoke
+	// code: both change a booking's state, and there is deliberately no
+	// booking.cancel or booking.reschedule permission (S12-BE reuses S11's
+	// own precedent here).
 	api.Handle("GET /api/v1/tenants/{tenantID}/bookings", authMiddleware.Wrap(tenantMiddleware.Wrap(
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.read"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -746,6 +755,13 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.update"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				bookingManagementHandler.Cancel(writer, request, request.PathValue("tenantID"), request.PathValue("bookingID"))
+			}),
+		),
+	)))
+	api.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/reschedule", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				bookingManagementHandler.Reschedule(writer, request, request.PathValue("tenantID"), request.PathValue("bookingID"))
 			}),
 		),
 	)))

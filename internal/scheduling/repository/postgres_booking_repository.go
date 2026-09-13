@@ -117,12 +117,28 @@ func (r *PostgresBookingRepository) Create(ctx context.Context, booking *model.B
 // engine uses — start_at < to AND end_at > from — and it is served by
 // bookings_tenant_staff_start_idx rather than by scanning the tenant's
 // bookings.
-func (r *PostgresBookingRepository) OccupiedIntervals(ctx context.Context, tenantID string, staffID string, from time.Time, to time.Time) ([]availability.OccupiedInterval, error) {
-	const query = `SELECT start_at, end_at FROM bookings
+//
+// excludeBookingID (S12-BE), when non-empty, omits that one booking's own
+// row from the result — the fix for the reschedule self-conflict problem:
+// a booking being moved is still CONFIRMED at its OLD interval while the
+// engine checks whether a NEW interval is available, and without this
+// exclusion the booking would appear to conflict with itself the moment the
+// old and new intervals overlap at all (including the trivial "reschedule
+// to the same slot" case). Every other caller (public availability, booking
+// creation) passes "", which adds no condition and changes nothing about
+// their existing behavior.
+func (r *PostgresBookingRepository) OccupiedIntervals(ctx context.Context, tenantID string, staffID string, from time.Time, to time.Time, excludeBookingID string) ([]availability.OccupiedInterval, error) {
+	query := `SELECT start_at, end_at FROM bookings
         WHERE tenant_id = $1 AND staff_id = $2 AND status = 'CONFIRMED'
-          AND start_at < $3 AND end_at > $4
-        ORDER BY start_at ASC`
-	rows, err := r.db.QueryContext(ctx, query, tenantID, staffID, to.UTC(), from.UTC())
+          AND start_at < $3 AND end_at > $4`
+	args := []any{tenantID, staffID, to.UTC(), from.UTC()}
+	if excludeBookingID != "" {
+		args = append(args, excludeBookingID)
+		query += fmt.Sprintf(" AND id != $%d", len(args))
+	}
+	query += " ORDER BY start_at ASC"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing occupied intervals: %w", err)
 	}
@@ -253,6 +269,35 @@ func (r *PostgresBookingRepository) Cancel(ctx context.Context, tenantID string,
 	}
 	if err != nil {
 		return nil, false, fmt.Errorf("cancelling booking: %w", err)
+	}
+	return booking, true, nil
+}
+
+// UpdateSchedule (S12-BE) moves a CONFIRMED booking to a new start/end,
+// scoped by id, tenant_id, AND status = 'CONFIRMED' — the identical
+// defense-in-depth shape Cancel uses. Returns updated=false (and a nil
+// booking) when no CONFIRMED row matched; the service layer, which has
+// already read the booking once before calling this, turns that into the
+// appropriate error. A target interval that overlaps another CONFIRMED
+// booking for the same staff member fails via the SAME bookings_no_overlap
+// exclusion constraint Create relies on — mapped here identically, never
+// surfaced as a raw constraint error. Postgres does not treat this row's own
+// prior interval as conflicting with its own UPDATE, so no self-exclusion
+// logic is needed at this layer.
+func (r *PostgresBookingRepository) UpdateSchedule(ctx context.Context, tenantID string, bookingID string, startAt time.Time, endAt time.Time) (*model.Booking, bool, error) {
+	const query = `UPDATE bookings
+        SET start_at = $1, end_at = $2, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $3 AND tenant_id = $4 AND status = 'CONFIRMED'
+        RETURNING ` + bookingColumns
+	booking, err := scanBooking(r.db.QueryRowContext(ctx, query, startAt.UTC(), endAt.UTC(), bookingID, tenantID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		if isBookingOverlapViolation(err) {
+			return nil, false, apperrors.New(apperrors.CodeBookingSlotUnavailable, "the requested time is no longer available", err)
+		}
+		return nil, false, fmt.Errorf("rescheduling booking: %w", err)
 	}
 	return booking, true, nil
 }

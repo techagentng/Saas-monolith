@@ -61,11 +61,14 @@ func (r *statefulBookingRepository) Create(_ context.Context, b *schedulingmodel
 	return &stored, nil
 }
 
-func (r *statefulBookingRepository) OccupiedIntervals(_ context.Context, tenantID, staffID string, from, to time.Time) ([]availability.OccupiedInterval, error) {
+func (r *statefulBookingRepository) OccupiedIntervals(_ context.Context, tenantID, staffID string, from, to time.Time, excludeBookingID string) ([]availability.OccupiedInterval, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := []availability.OccupiedInterval{}
 	for _, e := range r.bookings {
+		if excludeBookingID != "" && e.ID == excludeBookingID {
+			continue
+		}
 		if e.TenantID == tenantID && e.StaffID == staffID && e.Status == schedulingmodel.BookingConfirmed &&
 			e.StartAt.Before(to) && e.EndAt.After(from) {
 			out = append(out, availability.OccupiedInterval{Start: e.StartAt, End: e.EndAt})
@@ -164,6 +167,38 @@ func (r *statefulBookingRepository) Cancel(_ context.Context, tenantID, bookingI
 		}
 	}
 	return nil, false, nil
+}
+
+// UpdateSchedule (S12-BE) mirrors the real bookings_no_overlap exclusion
+// constraint: it rejects a target interval that overlaps another CONFIRMED
+// booking for the same staff member, but — exactly like Postgres updating a
+// row's own tuple — never treats the booking's own prior interval as a
+// conflict against itself.
+func (r *statefulBookingRepository) UpdateSchedule(_ context.Context, tenantID, bookingID string, startAt, endAt time.Time) (*schedulingmodel.Booking, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var target *schedulingmodel.Booking
+	for _, b := range r.bookings {
+		if b.ID == bookingID && b.TenantID == tenantID && b.Status == schedulingmodel.BookingConfirmed {
+			target = b
+			break
+		}
+	}
+	if target == nil {
+		return nil, false, nil
+	}
+	for _, e := range r.bookings {
+		if e.ID == bookingID || e.TenantID != tenantID || e.StaffID != target.StaffID || e.Status != schedulingmodel.BookingConfirmed {
+			continue
+		}
+		if startAt.Before(e.EndAt) && endAt.After(e.StartAt) {
+			return nil, false, apperrors.New(apperrors.CodeBookingSlotUnavailable, "the requested time is no longer available", nil)
+		}
+	}
+	target.StartAt, target.EndAt = startAt, endAt
+	target.UpdatedAt = time.Now().UTC()
+	copied := *target
+	return &copied, true, nil
 }
 
 var (

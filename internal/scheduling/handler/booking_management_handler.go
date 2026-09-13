@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
+	apperrors "github.com/techagentng/saas-monolith/internal/errors"
 	"github.com/techagentng/saas-monolith/internal/scheduling/service"
 )
 
@@ -131,6 +133,39 @@ func (h *BookingManagementHandler) Get(writer http.ResponseWriter, request *http
 // booking detail.
 func (h *BookingManagementHandler) Cancel(writer http.ResponseWriter, request *http.Request, tenantID string, bookingID string) {
 	detail, err := h.bookings.Cancel(request.Context(), tenantID, bookingID)
+	if err != nil {
+		writeSchedulingError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, toTenantBookingDetail(detail))
+}
+
+// rescheduleRequest is the decode target for reschedule. There is no field
+// for end, duration, service id, staff id, customer or price — a client
+// that sends them has them silently discarded, the same structural
+// protection every other write endpoint in this codebase relies on.
+type rescheduleRequest struct {
+	Date  string `json:"date"`
+	Start string `json:"start"`
+}
+
+// Reschedule handles POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/reschedule.
+//
+// Body: {"date": "YYYY-MM-DD", "start": "HH:MM"}, both interpreted in the
+// TENANT's own timezone (never the caller's). The response is the same
+// booking-detail DTO List/Get/Cancel already use — no second
+// reschedule-specific shape.
+func (h *BookingManagementHandler) Reschedule(writer http.ResponseWriter, request *http.Request, tenantID string, bookingID string) {
+	var body rescheduleRequest
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		writeSchedulingError(writer, apperrors.New(apperrors.CodeInvalidRequest, "invalid request", err))
+		return
+	}
+
+	detail, err := h.bookings.Reschedule(request.Context(), tenantID, bookingID, service.RescheduleBookingInput{
+		Date:  body.Date,
+		Start: body.Start,
+	})
 	if err != nil {
 		writeSchedulingError(writer, err)
 		return
