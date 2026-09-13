@@ -34,6 +34,15 @@ func (f *fakeAvailabilityEngine) GetAvailability(_ context.Context, tenantID, se
 	return f.result, nil
 }
 
+func (f *fakeAvailabilityEngine) GetAvailabilityExcludingBooking(_ context.Context, tenantID, serviceID, staffID, date, _ string) (*AvailabilityResult, error) {
+	f.calls++
+	f.gotTenant, f.gotSvc, f.gotStaff, f.gotDate = tenantID, serviceID, staffID, date
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.result, nil
+}
+
 // fakeBookingCreator records the booking it was handed and can be told to fail
 // as though the exclusion constraint fired.
 type fakeBookingCreator struct {

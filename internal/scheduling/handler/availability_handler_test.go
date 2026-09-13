@@ -29,6 +29,11 @@ func (f *fakeAvailabilityService) GetAvailability(_ context.Context, tenantID, s
 	return f.result, f.err
 }
 
+func (f *fakeAvailabilityService) GetAvailabilityExcludingBooking(_ context.Context, tenantID, serviceID, staffID, date, _ string) (*service.AvailabilityResult, error) {
+	f.tenantID, f.serviceID, f.staffID, f.date = tenantID, serviceID, staffID, date
+	return f.result, f.err
+}
+
 const (
 	availHandlerServiceID = "550e8400-e29b-41d4-a716-446655443001"
 	availHandlerStaffID   = "550e8400-e29b-41d4-a716-446655443002"

@@ -43,8 +43,12 @@ type AvailabilityWorkingHoursReader interface {
 // The window [from, to) is the requested tenant-local day already resolved to
 // instants. An implementation should return every committed interval that
 // intersects it, as absolute instants.
+//
+// excludeBookingID (S12-BE) omits one booking's own row from the result when
+// non-empty — see getAvailability's doc comment for why rescheduling needs
+// this. Every other caller passes "".
 type OccupancyReader interface {
-	OccupiedIntervals(ctx context.Context, tenantID string, staffID string, from time.Time, to time.Time) ([]availability.OccupiedInterval, error)
+	OccupiedIntervals(ctx context.Context, tenantID string, staffID string, from time.Time, to time.Time, excludeBookingID string) ([]availability.OccupiedInterval, error)
 }
 
 // NoOccupancy is the S7 OccupancyReader: it reports no commitments, because no
@@ -55,7 +59,7 @@ type OccupancyReader interface {
 type NoOccupancy struct{}
 
 // OccupiedIntervals always returns none.
-func (NoOccupancy) OccupiedIntervals(context.Context, string, string, time.Time, time.Time) ([]availability.OccupiedInterval, error) {
+func (NoOccupancy) OccupiedIntervals(context.Context, string, string, time.Time, time.Time, string) ([]availability.OccupiedInterval, error) {
 	return nil, nil
 }
 
@@ -110,6 +114,19 @@ type AvailabilityService interface {
 	//   - a tenant with a missing/invalid stored timezone → INTERNAL_ERROR
 	//     (a configuration fault, never mislabelled as caller VALIDATION_FAILED)
 	GetAvailability(ctx context.Context, tenantID string, serviceID string, staffID string, date string) (*AvailabilityResult, error)
+
+	// GetAvailabilityExcludingBooking (S12-BE) is GetAvailability with one
+	// additional rule: excludeBookingID's own current interval is excluded
+	// from occupancy before slots are generated. Used exclusively by
+	// owner-facing reschedule validation — a booking being moved is still
+	// CONFIRMED at its OLD interval while this checks whether a NEW interval
+	// is free, and without excluding it, the booking would appear to
+	// conflict with itself whenever the two intervals overlap at all
+	// (including rescheduling to its own current slot). Every other rule
+	// (service/staff validity, capability, working hours, past-slot
+	// filtering) is identical to GetAvailability — this does not
+	// reimplement or relax any of them.
+	GetAvailabilityExcludingBooking(ctx context.Context, tenantID string, serviceID string, staffID string, date string, excludeBookingID string) (*AvailabilityResult, error)
 }
 
 type availabilityService struct {
@@ -146,6 +163,22 @@ func NewAvailabilityService(
 }
 
 func (s *availabilityService) GetAvailability(ctx context.Context, tenantID string, serviceID string, staffID string, date string) (*AvailabilityResult, error) {
+	return s.getAvailability(ctx, tenantID, serviceID, staffID, date, "")
+}
+
+func (s *availabilityService) GetAvailabilityExcludingBooking(ctx context.Context, tenantID string, serviceID string, staffID string, date string, excludeBookingID string) (*AvailabilityResult, error) {
+	if _, err := uuid.Parse(excludeBookingID); err != nil {
+		return nil, apperrors.New(apperrors.CodeInvalidRequest, "invalid booking id", err)
+	}
+	return s.getAvailability(ctx, tenantID, serviceID, staffID, date, excludeBookingID)
+}
+
+// getAvailability is the one real implementation both exported methods
+// delegate to. excludeBookingID is "" for the public GetAvailability path
+// (no exclusion, unchanged behavior) and a real booking id only for
+// GetAvailabilityExcludingBooking's reschedule use — see that method's doc
+// comment for why the exclusion exists at all.
+func (s *availabilityService) getAvailability(ctx context.Context, tenantID string, serviceID string, staffID string, date string, excludeBookingID string) (*AvailabilityResult, error) {
 	if _, err := uuid.Parse(tenantID); err != nil {
 		return nil, apperrors.New(apperrors.CodeInvalidRequest, "invalid tenant id", err)
 	}
@@ -244,7 +277,7 @@ func (s *availabilityService) GetAvailability(ctx context.Context, tenantID stri
 
 	dayStart := time.Date(requestedDate.Year, requestedDate.Month, requestedDate.Day, 0, 0, 0, 0, location)
 	dayEnd := dayStart.AddDate(0, 0, 1)
-	occupied, err := s.occupancy.OccupiedIntervals(ctx, tenantID, staffID, dayStart, dayEnd)
+	occupied, err := s.occupancy.OccupiedIntervals(ctx, tenantID, staffID, dayStart, dayEnd, excludeBookingID)
 	if err != nil {
 		return nil, err
 	}

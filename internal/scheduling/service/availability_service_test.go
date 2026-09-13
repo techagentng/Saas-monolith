@@ -28,14 +28,16 @@ var year2000 = fixedClock{now: time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)}
 // by the occupied-interval tests. Everywhere else NoOccupancy is wired, which
 // is what S7 ships.
 type fakeOccupancy struct {
-	intervals []availability.OccupiedInterval
-	calls     int
-	from, to  time.Time
+	intervals        []availability.OccupiedInterval
+	calls            int
+	from, to         time.Time
+	lastExcludeID    string
 }
 
-func (f *fakeOccupancy) OccupiedIntervals(_ context.Context, _ string, _ string, from, to time.Time) ([]availability.OccupiedInterval, error) {
+func (f *fakeOccupancy) OccupiedIntervals(_ context.Context, _ string, _ string, from, to time.Time, excludeBookingID string) ([]availability.OccupiedInterval, error) {
 	f.calls++
 	f.from, f.to = from, to
+	f.lastExcludeID = excludeBookingID
 	return f.intervals, nil
 }
 

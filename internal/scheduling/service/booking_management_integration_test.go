@@ -3,16 +3,19 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	apperrors "github.com/techagentng/saas-monolith/internal/errors"
 	"github.com/techagentng/saas-monolith/internal/scheduling/availability"
 	schedulingmodel "github.com/techagentng/saas-monolith/internal/scheduling/model"
 	schedulingrepository "github.com/techagentng/saas-monolith/internal/scheduling/repository"
@@ -153,7 +156,11 @@ func TestCancelBookingReopensPublicAvailability(t *testing.T) {
 		bookingRepo, // real occupancy
 		SystemClock{},
 	)
-	management := NewBookingManagementService(bookingRepo, bookingRepo, tenants, SystemClock{})
+	management := NewBookingManagementService(
+		bookingRepo, bookingRepo, bookingRepo,
+		engine, schedulingrepository.NewPostgresServiceRepository(db),
+		tenants, SystemClock{},
+	)
 
 	// A date a week out (a real future weekday) and a slot in the middle of
 	// the working day, so past-slot filtering is irrelevant.
@@ -212,6 +219,277 @@ func TestCancelBookingReopensPublicAvailability(t *testing.T) {
 	if status != "CANCELLED" {
 		t.Fatalf("persisted status = %q, want CANCELLED (history preserved)", status)
 	}
+}
+
+// TestRescheduleReopensOldSlotAndOccupiesNewSlot is the mandatory S12-BE
+// section 24 end-to-end proof, against a REAL database: rescheduling a
+// CONFIRMED booking through BookingManagementService both frees its old slot
+// and occupies its new one in the S7 availability engine, with no scheduling
+// code aware that a "reschedule" happened — it is exactly what an UPDATE of
+// start_at/end_at under the existing occupancy query naturally produces.
+func TestRescheduleReopensOldSlotAndOccupiesNewSlot(t *testing.T) {
+	db := openBookingManagementTestDB(t)
+	ctx := context.Background()
+
+	const (
+		tenantID  = "550e8400-e29b-41d4-a716-4466554e4001"
+		serviceID = "550e8400-e29b-41d4-a716-4466554e4002"
+		staffID   = "550e8400-e29b-41d4-a716-4466554e4003"
+	)
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO tenants (id, name, slug, status, business_type, onboarding_status, currency, timezone)
+         VALUES ($1,'Luxe Nails','luxe-nails-4','ACTIVE','NAIL_TECHNICIAN','COMPLETED','NGN','Africa/Lagos')`, tenantID); err != nil {
+		t.Fatalf("seeding tenant: %v", err)
+	}
+	staffRepo := schedulingrepository.NewPostgresStaffRepository(db)
+	if _, err := staffRepo.Create(ctx, &schedulingmodel.StaffProfile{ID: staffID, TenantID: tenantID, DisplayName: "Ada", IsBookable: true}); err != nil {
+		t.Fatalf("seeding staff: %v", err)
+	}
+	if _, err := schedulingrepository.NewPostgresServiceRepository(db).Create(ctx, &schedulingmodel.Service{
+		ID: serviceID, TenantID: tenantID, Name: "Gel Manicure", DurationMinutes: 30, PriceMinor: 150000,
+	}); err != nil {
+		t.Fatalf("seeding service: %v", err)
+	}
+	capRepo := schedulingrepository.NewPostgresCapabilityRepository(db)
+	if err := capRepo.Assign(ctx, tenantID, staffID, serviceID); err != nil {
+		t.Fatalf("assigning capability: %v", err)
+	}
+	hoursRepo := schedulingrepository.NewPostgresWorkingHoursRepository(db)
+	for _, day := range []schedulingmodel.DayOfWeek{
+		schedulingmodel.Monday, schedulingmodel.Tuesday, schedulingmodel.Wednesday, schedulingmodel.Thursday,
+		schedulingmodel.Friday, schedulingmodel.Saturday, schedulingmodel.Sunday,
+	} {
+		if _, err := hoursRepo.Create(ctx, &schedulingmodel.WorkingHourInterval{
+			ID: uuid.NewString(), TenantID: tenantID, StaffID: staffID, DayOfWeek: day, StartTime: "09:00", EndTime: "17:00",
+		}); err != nil {
+			t.Fatalf("seeding working hours: %v", err)
+		}
+	}
+
+	bookingRepo := schedulingrepository.NewPostgresBookingRepository(db)
+	tenants := tenantrepository.NewPostgresTenantRepository(db)
+	engine := NewAvailabilityService(
+		tenants, schedulingrepository.NewPostgresServiceRepository(db), staffRepo, capRepo, hoursRepo, bookingRepo, SystemClock{},
+	)
+	management := NewBookingManagementService(
+		bookingRepo, bookingRepo, bookingRepo,
+		engine, schedulingrepository.NewPostgresServiceRepository(db),
+		tenants, SystemClock{},
+	)
+
+	date := time.Now().In(time.UTC).AddDate(0, 0, 7)
+	dateStr := date.Format("2006-01-02")
+	const oldSlot = "12:00"
+	const newSlot = "14:00"
+
+	lagos, _ := time.LoadLocation("Africa/Lagos")
+	parsedDate, _ := availability.ParseDate(dateStr)
+	startAt, _ := availability.ResolveInstant(parsedDate, oldSlot, lagos)
+	bookingID := uuid.NewString()
+	if _, err := bookingRepo.Create(ctx, &schedulingmodel.Booking{
+		ID: bookingID, TenantID: tenantID, ServiceID: serviceID, StaffID: staffID,
+		Customer: schedulingmodel.Customer{Name: "Jane Doe"},
+		StartAt:  startAt, EndAt: startAt.Add(30 * time.Minute), Status: schedulingmodel.BookingConfirmed,
+	}); err != nil {
+		t.Fatalf("creating booking: %v", err)
+	}
+
+	slotsBefore := availabilitySlotStarts(t, engine, ctx, tenantID, serviceID, staffID, dateStr)
+	if containsStr(slotsBefore, oldSlot) {
+		t.Fatalf("%s should be occupied before reschedule (slots: %v)", oldSlot, slotsBefore)
+	}
+	if !containsStr(slotsBefore, newSlot) {
+		t.Fatalf("%s should be free before reschedule (slots: %v)", newSlot, slotsBefore)
+	}
+
+	detail, err := management.Reschedule(ctx, tenantID, bookingID, RescheduleBookingInput{Date: dateStr, Start: newSlot})
+	if err != nil {
+		t.Fatalf("Reschedule: %v", err)
+	}
+	if detail.Status != schedulingmodel.BookingConfirmed {
+		t.Fatalf("status after reschedule = %q, want CONFIRMED", detail.Status)
+	}
+
+	slotsAfter := availabilitySlotStarts(t, engine, ctx, tenantID, serviceID, staffID, dateStr)
+	if !containsStr(slotsAfter, oldSlot) {
+		t.Fatalf("%s did NOT reopen after reschedule (slots: %v)", oldSlot, slotsAfter)
+	}
+	if containsStr(slotsAfter, newSlot) {
+		t.Fatalf("%s is still available after reschedule occupied it (slots: %v)", newSlot, slotsAfter)
+	}
+	if len(slotsAfter) != len(slotsBefore) {
+		t.Fatalf("after reschedule: %d slots, want the same total %d (one freed, one occupied)", len(slotsAfter), len(slotsBefore))
+	}
+
+	var start, end time.Time
+	var status string
+	if err := db.QueryRowContext(ctx, "SELECT start_at, end_at, status FROM bookings WHERE id = $1", bookingID).
+		Scan(&start, &end, &status); err != nil {
+		t.Fatalf("re-reading booking: %v", err)
+	}
+	wantStart, _ := availability.ResolveInstant(parsedDate, newSlot, lagos)
+	if !start.Equal(wantStart) || status != "CONFIRMED" {
+		t.Fatalf("persisted start=%s status=%s, want start=%s status=CONFIRMED", start, status, wantStart)
+	}
+	if !end.Equal(wantStart.Add(30 * time.Minute)) {
+		t.Fatalf("persisted end=%s, want %s", end, wantStart.Add(30*time.Minute))
+	}
+}
+
+// TestRescheduleConcurrentRaceHasExactlyOneWinner is the mandatory S12-BE
+// section 25/26 proof: two different CONFIRMED bookings, each rescheduled at
+// the same instant to the SAME target slot, race against the
+// bookings_no_overlap EXCLUDE constraint. Exactly one UPDATE may commit; the
+// loser must get BOOKING_SLOT_UNAVAILABLE (never a raw SQL/constraint error)
+// and its own original row must be completely unchanged (the atomicity/
+// rollback proof — a failed single-statement UPDATE touches zero rows).
+func TestRescheduleConcurrentRaceHasExactlyOneWinner(t *testing.T) {
+	db := openBookingManagementTestDB(t)
+	ctx := context.Background()
+
+	const (
+		tenantID  = "550e8400-e29b-41d4-a716-4466554e5001"
+		serviceID = "550e8400-e29b-41d4-a716-4466554e5002"
+		staffID   = "550e8400-e29b-41d4-a716-4466554e5003"
+	)
+
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO tenants (id, name, slug, status, business_type, onboarding_status, currency, timezone)
+         VALUES ($1,'Luxe Nails','luxe-nails-5','ACTIVE','NAIL_TECHNICIAN','COMPLETED','NGN','Africa/Lagos')`, tenantID); err != nil {
+		t.Fatalf("seeding tenant: %v", err)
+	}
+	staffRepo := schedulingrepository.NewPostgresStaffRepository(db)
+	if _, err := staffRepo.Create(ctx, &schedulingmodel.StaffProfile{ID: staffID, TenantID: tenantID, DisplayName: "Ada", IsBookable: true}); err != nil {
+		t.Fatalf("seeding staff: %v", err)
+	}
+	if _, err := schedulingrepository.NewPostgresServiceRepository(db).Create(ctx, &schedulingmodel.Service{
+		ID: serviceID, TenantID: tenantID, Name: "Gel Manicure", DurationMinutes: 30, PriceMinor: 150000,
+	}); err != nil {
+		t.Fatalf("seeding service: %v", err)
+	}
+	capRepo := schedulingrepository.NewPostgresCapabilityRepository(db)
+	if err := capRepo.Assign(ctx, tenantID, staffID, serviceID); err != nil {
+		t.Fatalf("assigning capability: %v", err)
+	}
+	hoursRepo := schedulingrepository.NewPostgresWorkingHoursRepository(db)
+	for _, day := range []schedulingmodel.DayOfWeek{
+		schedulingmodel.Monday, schedulingmodel.Tuesday, schedulingmodel.Wednesday, schedulingmodel.Thursday,
+		schedulingmodel.Friday, schedulingmodel.Saturday, schedulingmodel.Sunday,
+	} {
+		if _, err := hoursRepo.Create(ctx, &schedulingmodel.WorkingHourInterval{
+			ID: uuid.NewString(), TenantID: tenantID, StaffID: staffID, DayOfWeek: day, StartTime: "09:00", EndTime: "17:00",
+		}); err != nil {
+			t.Fatalf("seeding working hours: %v", err)
+		}
+	}
+
+	bookingRepo := schedulingrepository.NewPostgresBookingRepository(db)
+	tenants := tenantrepository.NewPostgresTenantRepository(db)
+	engine := NewAvailabilityService(
+		tenants, schedulingrepository.NewPostgresServiceRepository(db), staffRepo, capRepo, hoursRepo, bookingRepo, SystemClock{},
+	)
+	management := NewBookingManagementService(
+		bookingRepo, bookingRepo, bookingRepo,
+		engine, schedulingrepository.NewPostgresServiceRepository(db),
+		tenants, SystemClock{},
+	)
+
+	date := time.Now().In(time.UTC).AddDate(0, 0, 7)
+	dateStr := date.Format("2006-01-02")
+	lagos, _ := time.LoadLocation("Africa/Lagos")
+	parsedDate, _ := availability.ParseDate(dateStr)
+
+	// Two bookings at two DIFFERENT original slots, so neither's own
+	// self-exclusion masks the other's occupancy of the shared target.
+	seed := func(id, slot string) (start time.Time) {
+		start, _ = availability.ResolveInstant(parsedDate, slot, lagos)
+		if _, err := bookingRepo.Create(ctx, &schedulingmodel.Booking{
+			ID: id, TenantID: tenantID, ServiceID: serviceID, StaffID: staffID,
+			Customer: schedulingmodel.Customer{Name: "Jane Doe"},
+			StartAt:  start, EndAt: start.Add(30 * time.Minute), Status: schedulingmodel.BookingConfirmed,
+			// receipt_access_token is UNIQUE (migration 000021); two bookings
+			// both leaving this as the Go zero value ("") would collide.
+			ReceiptAccessToken: "test-token-" + id,
+		}); err != nil {
+			t.Fatalf("seeding booking %s: %v", id, err)
+		}
+		return start
+	}
+	bookingA := "550e8400-e29b-41d4-a716-4466554e5aaa"
+	bookingB := "550e8400-e29b-41d4-a716-4466554e5bbb"
+	startA := seed(bookingA, "10:00")
+	startB := seed(bookingB, "11:00")
+
+	const targetSlot = "15:00"
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	results := make([]error, 2)
+	ids := []string{bookingA, bookingB}
+	for i, id := range ids {
+		wg.Add(1)
+		go func(i int, bookingID string) {
+			defer wg.Done()
+			<-start
+			_, results[i] = management.Reschedule(ctx, tenantID, bookingID, RescheduleBookingInput{Date: dateStr, Start: targetSlot})
+		}(i, id)
+	}
+	close(start)
+	wg.Wait()
+
+	winners, conflicts := 0, 0
+	for i, err := range results {
+		switch {
+		case err == nil:
+			winners++
+		case isRescheduleSlotUnavailable(err):
+			conflicts++
+		default:
+			t.Fatalf("racer %d (%s) got an unexpected error: %v", i, ids[i], err)
+		}
+	}
+	if winners != 1 || conflicts != 1 {
+		t.Fatalf("winners = %d, conflicts = %d, want 1 and 1", winners, conflicts)
+	}
+
+	// Exactly one booking now occupies the target slot; the loser is
+	// completely unchanged at its own original time (the rollback proof: a
+	// failed single-statement UPDATE affects zero rows).
+	wantTarget, _ := availability.ResolveInstant(parsedDate, targetSlot, lagos)
+	var startAAfter, startBAfter time.Time
+	if err := db.QueryRowContext(ctx, "SELECT start_at FROM bookings WHERE id = $1", bookingA).Scan(&startAAfter); err != nil {
+		t.Fatalf("re-reading booking A: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT start_at FROM bookings WHERE id = $1", bookingB).Scan(&startBAfter); err != nil {
+		t.Fatalf("re-reading booking B: %v", err)
+	}
+
+	aMoved := startAAfter.Equal(wantTarget)
+	bMoved := startBAfter.Equal(wantTarget)
+	if aMoved == bMoved {
+		t.Fatalf("exactly one booking should occupy the target slot; A moved=%v B moved=%v", aMoved, bMoved)
+	}
+	if aMoved && !startBAfter.Equal(startB) {
+		t.Fatalf("loser B should be unchanged: got %s, want original %s", startBAfter, startB)
+	}
+	if bMoved && !startAAfter.Equal(startA) {
+		t.Fatalf("loser A should be unchanged: got %s, want original %s", startAAfter, startA)
+	}
+
+	var rows int
+	if err := db.QueryRowContext(ctx,
+		"SELECT count(*) FROM bookings WHERE tenant_id = $1 AND staff_id = $2 AND status = 'CONFIRMED' AND start_at = $3",
+		tenantID, staffID, wantTarget).Scan(&rows); err != nil {
+		t.Fatalf("counting target-slot rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("rows occupying the target slot = %d, want exactly 1", rows)
+	}
+}
+
+func isRescheduleSlotUnavailable(err error) bool {
+	var appErr *apperrors.AppError
+	return errors.As(err, &appErr) && appErr.Code == apperrors.CodeBookingSlotUnavailable
 }
 
 func availabilitySlotStarts(t *testing.T, engine AvailabilityService, ctx context.Context, tenantID, serviceID, staffID, date string) []string {
