@@ -24,11 +24,12 @@ const (
 // and records the filter it was handed so the view->filter translation can
 // be asserted without a database.
 type fakeBookingStore struct {
-	rows          []*repository.BookingWithRelations
-	lastFilter    repository.BookingListFilter
-	lastTenant    string
-	cancelErr     error
-	rescheduleErr error
+	rows            []*repository.BookingWithRelations
+	lastFilter      repository.BookingListFilter
+	lastTenant      string
+	cancelErr       error
+	rescheduleErr   error
+	updateStatusErr error
 }
 
 func (f *fakeBookingStore) ListByTenant(_ context.Context, tenantID string, filter repository.BookingListFilter) ([]*repository.BookingWithRelations, error) {
@@ -39,6 +40,9 @@ func (f *fakeBookingStore) ListByTenant(_ context.Context, tenantID string, filt
 			continue
 		}
 		if filter.Status != nil && r.Booking.Status != *filter.Status {
+			continue
+		}
+		if filter.ExcludeStatus != nil && r.Booking.Status == *filter.ExcludeStatus {
 			continue
 		}
 		switch filter.Window {
@@ -132,6 +136,23 @@ func (f *fakeBookingStore) UpdateSchedule(_ context.Context, tenantID, bookingID
 	return &copied, true, nil
 }
 
+// UpdateStatus (S13-BE) mirrors Cancel/UpdateSchedule's own WHERE-clause
+// shape: it only ever transitions a CONFIRMED row.
+func (f *fakeBookingStore) UpdateStatus(_ context.Context, tenantID, bookingID string, newStatus model.BookingStatus) (*model.Booking, bool, error) {
+	if f.updateStatusErr != nil {
+		return nil, false, f.updateStatusErr
+	}
+	for _, r := range f.rows {
+		if r.Booking.ID == bookingID && r.Booking.TenantID == tenantID && r.Booking.Status == model.BookingConfirmed {
+			r.Booking.Status = newStatus
+			r.Booking.UpdatedAt = time.Now().UTC()
+			copied := r.Booking
+			return &copied, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
 func bmRow(id, tenantID string, status model.BookingStatus, start time.Time, customer model.Customer) *repository.BookingWithRelations {
 	return &repository.BookingWithRelations{
 		Booking: model.Booking{
@@ -150,7 +171,7 @@ func bmFixture(now time.Time, rows ...*repository.BookingWithRelations) (*fakeBo
 	// List/Get/Cancel never touch scheduling logic, so a nilAvailability that
 	// fails loudly if reached is itself a useful assertion for THOSE tests;
 	// the dedicated rescheduleFixture below wires the real engine.
-	svc := NewBookingManagementService(store, store, store, nilAvailability{}, newFakeServiceRepository(), tenants, fixedClock{now: now})
+	svc := NewBookingManagementService(store, store, store, store, nilAvailability{}, newFakeServiceRepository(), tenants, fixedClock{now: now})
 	return store, tenants, svc
 }
 
@@ -219,7 +240,7 @@ func newRescheduleFixture(now time.Time, rows ...*repository.BookingWithRelation
 	}
 
 	engine := NewAvailabilityService(tenants, services, staff, capabilities, hours, store, fixedClock{now: now})
-	svc := NewBookingManagementService(store, store, store, engine, services, tenants, fixedClock{now: now})
+	svc := NewBookingManagementService(store, store, store, store, engine, services, tenants, fixedClock{now: now})
 
 	return &rescheduleFixture{store: store, tenants: tenants, services: services, staff: staff, capabilities: capabilities, hours: hours, svc: svc}
 }
@@ -431,8 +452,11 @@ func TestListUpcomingIsConfirmedAndFuture(t *testing.T) {
 func TestListPastAndCancelledAndAllTranslateCorrectly(t *testing.T) {
 	store, _, svc := bmFixture(bmNow)
 
+	// S13-BE: PAST excludes CANCELLED rather than requiring CONFIRMED, so
+	// CONFIRMED, COMPLETED and NO_SHOW bookings that have already started all
+	// appear in the historical view.
 	_, _ = svc.List(context.Background(), tenantA, BookingListFilter{View: BookingViewPast})
-	if f := store.lastFilter; f.Status == nil || *f.Status != model.BookingConfirmed || f.Window != repository.BookingWindowPast {
+	if f := store.lastFilter; f.ExcludeStatus == nil || *f.ExcludeStatus != model.BookingCancelled || f.Status != nil || f.Window != repository.BookingWindowPast {
 		t.Fatalf("past filter = %+v", f)
 	}
 	_, _ = svc.List(context.Background(), tenantA, BookingListFilter{View: BookingViewCancelled})
@@ -634,6 +658,218 @@ func TestCancelNonexistentBookingIsNotFound(t *testing.T) {
 	_, _, svc := bmFixture(bmNow)
 	_, err := svc.Cancel(context.Background(), tenantA, "550e8400-e29b-41d4-a716-4466554e9999")
 	assertCode(t, err, apperrors.CodeBookingNotFound, "nonexistent cancel")
+}
+
+// S13-BE section 14/26: once a booking is COMPLETED or NO_SHOW, cancellation
+// must be rejected, not silently accepted as a no-op or misreported as
+// idempotent success (the pre-S13 "the only other status is CONFIRMED"
+// assumption in Cancel would otherwise attempt-and-silently-no-op here).
+func TestCancelRejectsACompletedBooking(t *testing.T) {
+	row := bmRow(bmBookingID, tenantA, model.BookingCompleted, bmNow.Add(-72*time.Hour), model.Customer{Name: "Jane"})
+	store, _, svc := bmFixture(bmNow, row)
+
+	_, err := svc.Cancel(context.Background(), tenantA, bmBookingID)
+	assertCode(t, err, apperrors.CodeBookingInvalidTransition, "cancel a completed booking")
+	if store.rows[0].Booking.Status != model.BookingCompleted {
+		t.Fatal("a rejected cancel mutated the booking")
+	}
+}
+
+func TestCancelRejectsANoShowBooking(t *testing.T) {
+	row := bmRow(bmBookingID, tenantA, model.BookingNoShow, bmNow.Add(-72*time.Hour), model.Customer{Name: "Jane"})
+	store, _, svc := bmFixture(bmNow, row)
+
+	_, err := svc.Cancel(context.Background(), tenantA, bmBookingID)
+	assertCode(t, err, apperrors.CodeBookingInvalidTransition, "cancel a no-show booking")
+	if store.rows[0].Booking.Status != model.BookingNoShow {
+		t.Fatal("a rejected cancel mutated the booking")
+	}
+}
+
+// --- Complete / NoShow (S13-BE) -----------------------------------------
+
+func TestCompletePastConfirmedBookingTransitionsToCompleted(t *testing.T) {
+	row := bmRow(bmBookingID, tenantA, model.BookingConfirmed, bmNow.Add(-2*time.Hour), model.Customer{Name: "Jane"}) // ended 90m ago
+	store, _, svc := bmFixture(bmNow, row)
+
+	d, err := svc.Complete(context.Background(), tenantA, bmBookingID)
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if d.Status != model.BookingCompleted {
+		t.Fatalf("status = %q, want COMPLETED", d.Status)
+	}
+	if len(store.rows) != 1 || store.rows[0].Booking.Status != model.BookingCompleted {
+		t.Fatalf("row not preserved-and-completed: %+v", store.rows)
+	}
+}
+
+func TestCompleteIsIdempotentOnAnAlreadyCompletedBooking(t *testing.T) {
+	row := bmRow(bmBookingID, tenantA, model.BookingCompleted, bmNow.Add(-2*time.Hour), model.Customer{Name: "Jane"})
+	store, _, svc := bmFixture(bmNow, row)
+	store.updateStatusErr = apperrors.New(apperrors.CodeInternalError, "UpdateStatus must not be called for an already-completed booking", nil)
+
+	d, err := svc.Complete(context.Background(), tenantA, bmBookingID)
+	if err != nil {
+		t.Fatalf("idempotent complete returned error: %v", err)
+	}
+	if d.Status != model.BookingCompleted {
+		t.Fatalf("status = %q", d.Status)
+	}
+}
+
+func TestMarkNoShowOnPastConfirmedBookingTransitionsToNoShow(t *testing.T) {
+	row := bmRow(bmBookingID, tenantA, model.BookingConfirmed, bmNow.Add(-2*time.Hour), model.Customer{Name: "Jane"})
+	store, _, svc := bmFixture(bmNow, row)
+
+	d, err := svc.MarkNoShow(context.Background(), tenantA, bmBookingID)
+	if err != nil {
+		t.Fatalf("MarkNoShow: %v", err)
+	}
+	if d.Status != model.BookingNoShow {
+		t.Fatalf("status = %q, want NO_SHOW", d.Status)
+	}
+	if len(store.rows) != 1 || store.rows[0].Booking.Status != model.BookingNoShow {
+		t.Fatalf("row not preserved-and-marked: %+v", store.rows)
+	}
+}
+
+func TestMarkNoShowIsIdempotentOnAnAlreadyNoShowBooking(t *testing.T) {
+	row := bmRow(bmBookingID, tenantA, model.BookingNoShow, bmNow.Add(-2*time.Hour), model.Customer{Name: "Jane"})
+	store, _, svc := bmFixture(bmNow, row)
+	store.updateStatusErr = apperrors.New(apperrors.CodeInternalError, "UpdateStatus must not be called for an already-no-show booking", nil)
+
+	d, err := svc.MarkNoShow(context.Background(), tenantA, bmBookingID)
+	if err != nil {
+		t.Fatalf("idempotent no-show returned error: %v", err)
+	}
+	if d.Status != model.BookingNoShow {
+		t.Fatalf("status = %q", d.Status)
+	}
+}
+
+// S13-BE section 26: every disallowed transition, both directions.
+func TestCompleteAndNoShowRejectInvalidCurrentStatuses(t *testing.T) {
+	past := bmNow.Add(-2 * time.Hour)
+	for _, tc := range []struct {
+		name   string
+		status model.BookingStatus
+		action func(svc BookingManagementService) (*BookingDetail, error)
+	}{
+		{"cancelled -> complete", model.BookingCancelled, func(svc BookingManagementService) (*BookingDetail, error) {
+			return svc.Complete(context.Background(), tenantA, bmBookingID)
+		}},
+		{"cancelled -> no-show", model.BookingCancelled, func(svc BookingManagementService) (*BookingDetail, error) {
+			return svc.MarkNoShow(context.Background(), tenantA, bmBookingID)
+		}},
+		{"completed -> no-show", model.BookingCompleted, func(svc BookingManagementService) (*BookingDetail, error) {
+			return svc.MarkNoShow(context.Background(), tenantA, bmBookingID)
+		}},
+		{"no-show -> complete", model.BookingNoShow, func(svc BookingManagementService) (*BookingDetail, error) {
+			return svc.Complete(context.Background(), tenantA, bmBookingID)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := bmRow(bmBookingID, tenantA, tc.status, past, model.Customer{Name: "Jane"})
+			store, _, svc := bmFixture(bmNow, row)
+			store.updateStatusErr = apperrors.New(apperrors.CodeInternalError, "UpdateStatus must not be called for an invalid transition", nil)
+
+			_, err := tc.action(svc)
+			assertCode(t, err, apperrors.CodeBookingInvalidTransition, tc.name)
+			if store.rows[0].Booking.Status != tc.status {
+				t.Fatalf("a rejected transition mutated the booking: got %q, want unchanged %q", store.rows[0].Booking.Status, tc.status)
+			}
+		})
+	}
+}
+
+// S13-BE section 27: an owner should not be able to complete or no-show a
+// booking whose appointment has not happened yet.
+func TestCompleteAndNoShowRejectAFutureConfirmedBooking(t *testing.T) {
+	future := bmNow.Add(2 * time.Hour) // ends 2h30m from now
+	for _, tc := range []struct {
+		name   string
+		action func(svc BookingManagementService) (*BookingDetail, error)
+	}{
+		{"complete", func(svc BookingManagementService) (*BookingDetail, error) {
+			return svc.Complete(context.Background(), tenantA, bmBookingID)
+		}},
+		{"no-show", func(svc BookingManagementService) (*BookingDetail, error) {
+			return svc.MarkNoShow(context.Background(), tenantA, bmBookingID)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row := bmRow(bmBookingID, tenantA, model.BookingConfirmed, future, model.Customer{Name: "Jane"})
+			store, _, svc := bmFixture(bmNow, row)
+			store.updateStatusErr = apperrors.New(apperrors.CodeInternalError, "UpdateStatus must not be called before the booking has ended", nil)
+
+			_, err := tc.action(svc)
+			assertCode(t, err, apperrors.CodeBookingInvalidTransition, tc.name+" a future booking")
+			if store.rows[0].Booking.Status != model.BookingConfirmed {
+				t.Fatalf("a rejected transition mutated the booking: %q", store.rows[0].Booking.Status)
+			}
+		})
+	}
+}
+
+// S13-BE section 28: the exact boundary "now == booking.end" is eligible
+// (>=, not >). bmRow gives every booking a 30-minute duration, so starting it
+// exactly 30 minutes before bmNow makes EndAt land exactly on bmNow.
+func TestCompleteAtExactlyTheBookingsEndTimeIsEligible(t *testing.T) {
+	start := bmNow.Add(-30 * time.Minute) // EndAt == bmNow exactly
+	row := bmRow(bmBookingID, tenantA, model.BookingConfirmed, start, model.Customer{Name: "Jane"})
+	_, _, svc := bmFixture(bmNow, row)
+
+	d, err := svc.Complete(context.Background(), tenantA, bmBookingID)
+	if err != nil {
+		t.Fatalf("Complete at the exact boundary should be eligible: %v", err)
+	}
+	if d.Status != model.BookingCompleted {
+		t.Fatalf("status = %q", d.Status)
+	}
+}
+
+func TestCompleteAndNoShowAreCrossTenantNotFound(t *testing.T) {
+	row := bmRow(bmBookingID, tenantB, model.BookingConfirmed, bmNow.Add(-2*time.Hour), model.Customer{Name: "Jane"})
+	_, _, svc := bmFixture(bmNow, row) // fixture tenant is tenantA
+
+	_, err := svc.Complete(context.Background(), tenantA, bmBookingID)
+	assertCode(t, err, apperrors.CodeBookingNotFound, "cross-tenant complete")
+
+	_, err = svc.MarkNoShow(context.Background(), tenantA, bmBookingID)
+	assertCode(t, err, apperrors.CodeBookingNotFound, "cross-tenant no-show")
+}
+
+func TestCompleteAndNoShowRejectMalformedIDs(t *testing.T) {
+	_, _, svc := bmFixture(bmNow)
+
+	_, err := svc.Complete(context.Background(), tenantA, "nope")
+	assertCode(t, err, apperrors.CodeInvalidRequest, "malformed complete id")
+
+	_, err = svc.MarkNoShow(context.Background(), tenantA, "nope")
+	assertCode(t, err, apperrors.CodeInvalidRequest, "malformed no-show id")
+}
+
+func TestCompleteAndNoShowNonexistentBookingIsNotFound(t *testing.T) {
+	_, _, svc := bmFixture(bmNow)
+	_, err := svc.Complete(context.Background(), tenantA, "550e8400-e29b-41d4-a716-4466554e9999")
+	assertCode(t, err, apperrors.CodeBookingNotFound, "nonexistent complete")
+	_, err = svc.MarkNoShow(context.Background(), tenantA, "550e8400-e29b-41d4-a716-4466554e9999")
+	assertCode(t, err, apperrors.CodeBookingNotFound, "nonexistent no-show")
+}
+
+// S13-BE section 31: rescheduling must remain rejected for both new terminal
+// statuses.
+func TestRescheduleRejectsCompletedAndNoShowBookings(t *testing.T) {
+	for _, status := range []model.BookingStatus{model.BookingCompleted, model.BookingNoShow} {
+		t.Run(string(status), func(t *testing.T) {
+			row := rsRow(rsBookingID, status, time.Date(2026, 9, 11, 9, 0, 0, 0, time.UTC))
+			f := newRescheduleFixture(rsNow, row)
+
+			_, err := f.svc.Reschedule(context.Background(), rsTenant, rsBookingID, RescheduleBookingInput{Date: "2026-09-14", Start: "10:00"})
+			assertCode(t, err, apperrors.CodeValidationFailed, "reschedule a "+string(status)+" booking")
+		})
+	}
 }
 
 // PII must never appear in an error the service produces.

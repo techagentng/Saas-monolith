@@ -53,6 +53,7 @@ var bmIntegrationMigrations = []string{
 	"000019_create_service_categories.up.sql",
 	"000020_create_service_images.up.sql",
 	"000021_add_booking_receipt_access_token.up.sql",
+	"000022_add_booking_terminal_statuses.up.sql",
 }
 
 var bmIntegrationTables = []string{
@@ -157,7 +158,7 @@ func TestCancelBookingReopensPublicAvailability(t *testing.T) {
 		SystemClock{},
 	)
 	management := NewBookingManagementService(
-		bookingRepo, bookingRepo, bookingRepo,
+		bookingRepo, bookingRepo, bookingRepo, bookingRepo,
 		engine, schedulingrepository.NewPostgresServiceRepository(db),
 		tenants, SystemClock{},
 	)
@@ -273,7 +274,7 @@ func TestRescheduleReopensOldSlotAndOccupiesNewSlot(t *testing.T) {
 		tenants, schedulingrepository.NewPostgresServiceRepository(db), staffRepo, capRepo, hoursRepo, bookingRepo, SystemClock{},
 	)
 	management := NewBookingManagementService(
-		bookingRepo, bookingRepo, bookingRepo,
+		bookingRepo, bookingRepo, bookingRepo, bookingRepo,
 		engine, schedulingrepository.NewPostgresServiceRepository(db),
 		tenants, SystemClock{},
 	)
@@ -390,7 +391,7 @@ func TestRescheduleConcurrentRaceHasExactlyOneWinner(t *testing.T) {
 		tenants, schedulingrepository.NewPostgresServiceRepository(db), staffRepo, capRepo, hoursRepo, bookingRepo, SystemClock{},
 	)
 	management := NewBookingManagementService(
-		bookingRepo, bookingRepo, bookingRepo,
+		bookingRepo, bookingRepo, bookingRepo, bookingRepo,
 		engine, schedulingrepository.NewPostgresServiceRepository(db),
 		tenants, SystemClock{},
 	)
@@ -485,6 +486,215 @@ func TestRescheduleConcurrentRaceHasExactlyOneWinner(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("rows occupying the target slot = %d, want exactly 1", rows)
 	}
+}
+
+// buildLifecycleFixture (S13-BE) seeds one fully public nail tenant plus one
+// bookable technician performing one 30-minute service, working every day
+// 09:00-17:00 Africa/Lagos — the identical shape every other test in this
+// file seeds, factored out because the three S13-BE tests below all need it.
+func buildLifecycleFixture(t *testing.T, db *sql.DB, tenantID, serviceID, staffID string) (BookingManagementService, *schedulingrepository.PostgresBookingRepository) {
+	t.Helper()
+	ctx := context.Background()
+	slug := "luxe-nails-" + strings.ToLower(strings.ReplaceAll(tenantID, "-", ""))[24:]
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO tenants (id, name, slug, status, business_type, onboarding_status, currency, timezone)
+         VALUES ($1,'Luxe Nails',$2,'ACTIVE','NAIL_TECHNICIAN','COMPLETED','NGN','Africa/Lagos')`, tenantID, slug); err != nil {
+		t.Fatalf("seeding tenant: %v", err)
+	}
+	staffRepo := schedulingrepository.NewPostgresStaffRepository(db)
+	if _, err := staffRepo.Create(ctx, &schedulingmodel.StaffProfile{ID: staffID, TenantID: tenantID, DisplayName: "Ada", IsBookable: true}); err != nil {
+		t.Fatalf("seeding staff: %v", err)
+	}
+	if _, err := schedulingrepository.NewPostgresServiceRepository(db).Create(ctx, &schedulingmodel.Service{
+		ID: serviceID, TenantID: tenantID, Name: "Gel Manicure", DurationMinutes: 30, PriceMinor: 150000,
+	}); err != nil {
+		t.Fatalf("seeding service: %v", err)
+	}
+	capRepo := schedulingrepository.NewPostgresCapabilityRepository(db)
+	if err := capRepo.Assign(ctx, tenantID, staffID, serviceID); err != nil {
+		t.Fatalf("assigning capability: %v", err)
+	}
+	hoursRepo := schedulingrepository.NewPostgresWorkingHoursRepository(db)
+	for _, day := range []schedulingmodel.DayOfWeek{
+		schedulingmodel.Monday, schedulingmodel.Tuesday, schedulingmodel.Wednesday, schedulingmodel.Thursday,
+		schedulingmodel.Friday, schedulingmodel.Saturday, schedulingmodel.Sunday,
+	} {
+		if _, err := hoursRepo.Create(ctx, &schedulingmodel.WorkingHourInterval{
+			ID: uuid.NewString(), TenantID: tenantID, StaffID: staffID, DayOfWeek: day, StartTime: "09:00", EndTime: "17:00",
+		}); err != nil {
+			t.Fatalf("seeding working hours: %v", err)
+		}
+	}
+
+	bookingRepo := schedulingrepository.NewPostgresBookingRepository(db)
+	tenants := tenantrepository.NewPostgresTenantRepository(db)
+	engine := NewAvailabilityService(
+		tenants, schedulingrepository.NewPostgresServiceRepository(db), staffRepo, capRepo, hoursRepo, bookingRepo, SystemClock{},
+	)
+	management := NewBookingManagementService(
+		bookingRepo, bookingRepo, bookingRepo, bookingRepo,
+		engine, schedulingrepository.NewPostgresServiceRepository(db),
+		tenants, SystemClock{},
+	)
+	return management, bookingRepo
+}
+
+// TestCompleteAndNoShowPersistRealDB is the mandatory S13-BE section 29
+// proof: Complete and MarkNoShow, called through BookingManagementService
+// against a REAL database, persist COMPLETED/NO_SHOW — read back with a
+// fresh query, not the same row the write returned.
+func TestCompleteAndNoShowPersistRealDB(t *testing.T) {
+	db := openBookingManagementTestDB(t)
+	ctx := context.Background()
+	const (
+		tenantID  = "550e8400-e29b-41d4-a716-4466554e6001"
+		serviceID = "550e8400-e29b-41d4-a716-4466554e6002"
+		staffID   = "550e8400-e29b-41d4-a716-4466554e6003"
+	)
+	management, bookingRepo := buildLifecycleFixture(t, db, tenantID, serviceID, staffID)
+
+	seedPastBooking := func(id string, hoursAgo time.Duration) {
+		start := time.Now().UTC().Add(-hoursAgo)
+		if _, err := bookingRepo.Create(ctx, &schedulingmodel.Booking{
+			ID: id, TenantID: tenantID, ServiceID: serviceID, StaffID: staffID,
+			Customer: schedulingmodel.Customer{Name: "Jane Doe"},
+			StartAt:  start, EndAt: start.Add(30 * time.Minute), Status: schedulingmodel.BookingConfirmed,
+			ReceiptAccessToken: "test-token-" + id,
+		}); err != nil {
+			t.Fatalf("seeding booking %s: %v", id, err)
+		}
+	}
+
+	completeID := "550e8400-e29b-41d4-a716-4466554e6aaa"
+	noShowID := "550e8400-e29b-41d4-a716-4466554e6bbb"
+	seedPastBooking(completeID, 3*time.Hour)
+	seedPastBooking(noShowID, 4*time.Hour)
+
+	if detail, err := management.Complete(ctx, tenantID, completeID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	} else if detail.Status != schedulingmodel.BookingCompleted {
+		t.Fatalf("returned status = %q, want COMPLETED", detail.Status)
+	}
+	if detail, err := management.MarkNoShow(ctx, tenantID, noShowID); err != nil {
+		t.Fatalf("MarkNoShow: %v", err)
+	} else if detail.Status != schedulingmodel.BookingNoShow {
+		t.Fatalf("returned status = %q, want NO_SHOW", detail.Status)
+	}
+
+	var completeStatus, noShowStatus string
+	if err := db.QueryRowContext(ctx, "SELECT status FROM bookings WHERE id = $1", completeID).Scan(&completeStatus); err != nil {
+		t.Fatalf("re-reading completed booking: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, "SELECT status FROM bookings WHERE id = $1", noShowID).Scan(&noShowStatus); err != nil {
+		t.Fatalf("re-reading no-show booking: %v", err)
+	}
+	if completeStatus != "COMPLETED" {
+		t.Fatalf("persisted status = %q, want COMPLETED", completeStatus)
+	}
+	if noShowStatus != "NO_SHOW" {
+		t.Fatalf("persisted status = %q, want NO_SHOW", noShowStatus)
+	}
+}
+
+// TestCompleteAndNoShowTenantIsolationRealDB is the mandatory S13-BE section
+// 29 tenant-isolation proof against a REAL database: a booking that belongs
+// to a DIFFERENT tenant than the caller is BOOKING_NOT_FOUND, and the row is
+// completely untouched.
+func TestCompleteAndNoShowTenantIsolationRealDB(t *testing.T) {
+	db := openBookingManagementTestDB(t)
+	ctx := context.Background()
+	const (
+		tenantA   = "550e8400-e29b-41d4-a716-4466554e7001"
+		tenantB   = "550e8400-e29b-41d4-a716-4466554e7011"
+		serviceA  = "550e8400-e29b-41d4-a716-4466554e7002"
+		serviceB  = "550e8400-e29b-41d4-a716-4466554e7012"
+		staffA    = "550e8400-e29b-41d4-a716-4466554e7003"
+		staffB    = "550e8400-e29b-41d4-a716-4466554e7013"
+		bookingID = "550e8400-e29b-41d4-a716-4466554e7aaa"
+	)
+	managementA, _ := buildLifecycleFixture(t, db, tenantA, serviceA, staffA)
+	_, bookingRepoB := buildLifecycleFixture(t, db, tenantB, serviceB, staffB)
+
+	start := time.Now().UTC().Add(-3 * time.Hour)
+	if _, err := bookingRepoB.Create(ctx, &schedulingmodel.Booking{
+		ID: bookingID, TenantID: tenantB, ServiceID: serviceB, StaffID: staffB,
+		Customer: schedulingmodel.Customer{Name: "Jane Doe"},
+		StartAt:  start, EndAt: start.Add(30 * time.Minute), Status: schedulingmodel.BookingConfirmed,
+		ReceiptAccessToken: "test-token-" + bookingID,
+	}); err != nil {
+		t.Fatalf("seeding tenant B's booking: %v", err)
+	}
+
+	if _, err := managementA.Complete(ctx, tenantA, bookingID); !isBookingNotFound(err) {
+		t.Fatalf("Complete across tenants: err = %v, want BOOKING_NOT_FOUND", err)
+	}
+	if _, err := managementA.MarkNoShow(ctx, tenantA, bookingID); !isBookingNotFound(err) {
+		t.Fatalf("MarkNoShow across tenants: err = %v, want BOOKING_NOT_FOUND", err)
+	}
+
+	var status string
+	if err := db.QueryRowContext(ctx, "SELECT status FROM bookings WHERE id = $1", bookingID).Scan(&status); err != nil {
+		t.Fatalf("re-reading booking: %v", err)
+	}
+	if status != "CONFIRMED" {
+		t.Fatalf("a cross-tenant transition mutated the booking: persisted status = %q", status)
+	}
+}
+
+// TestCompleteAndNoShowDoNotCountAsOccupancyRealDB is the mandatory S13-BE
+// section 30 proof against a REAL database: OccupiedIntervals — the S7
+// OccupancyReader's concrete backing — stops returning a booking's interval
+// the moment it becomes COMPLETED or NO_SHOW, exactly as it already does for
+// CANCELLED, because the query filters on status = 'CONFIRMED' alone
+// (unchanged by S13-BE).
+func TestCompleteAndNoShowDoNotCountAsOccupancyRealDB(t *testing.T) {
+	db := openBookingManagementTestDB(t)
+	ctx := context.Background()
+	const (
+		tenantID  = "550e8400-e29b-41d4-a716-4466554e8001"
+		serviceID = "550e8400-e29b-41d4-a716-4466554e8002"
+		staffID   = "550e8400-e29b-41d4-a716-4466554e8003"
+	)
+	management, bookingRepo := buildLifecycleFixture(t, db, tenantID, serviceID, staffID)
+
+	start := time.Now().UTC().Add(-3 * time.Hour)
+	end := start.Add(30 * time.Minute)
+	completeID := "550e8400-e29b-41d4-a716-4466554e8aaa"
+	if _, err := bookingRepo.Create(ctx, &schedulingmodel.Booking{
+		ID: completeID, TenantID: tenantID, ServiceID: serviceID, StaffID: staffID,
+		Customer: schedulingmodel.Customer{Name: "Jane Doe"},
+		StartAt:  start, EndAt: end, Status: schedulingmodel.BookingConfirmed,
+		ReceiptAccessToken: "test-token-" + completeID,
+	}); err != nil {
+		t.Fatalf("seeding booking: %v", err)
+	}
+
+	// A window that exactly covers the booking's own interval — the same
+	// [from, to) shape OccupiedIntervals' own overlap predicate uses.
+	before, err := bookingRepo.OccupiedIntervals(ctx, tenantID, staffID, start, end, "")
+	if err != nil {
+		t.Fatalf("OccupiedIntervals (before): %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("occupied intervals before completion = %d, want exactly 1 (the CONFIRMED booking)", len(before))
+	}
+
+	if _, err := management.Complete(ctx, tenantID, completeID); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	after, err := bookingRepo.OccupiedIntervals(ctx, tenantID, staffID, start, end, "")
+	if err != nil {
+		t.Fatalf("OccupiedIntervals (after): %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("occupied intervals after completion = %d, want 0 — COMPLETED must not count as active occupancy", len(after))
+	}
+}
+
+func isBookingNotFound(err error) bool {
+	var appErr *apperrors.AppError
+	return errors.As(err, &appErr) && appErr.Code == apperrors.CodeBookingNotFound
 }
 
 func isRescheduleSlotUnavailable(err error) bool {

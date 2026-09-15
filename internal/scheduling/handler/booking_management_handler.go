@@ -173,6 +173,33 @@ func (h *BookingManagementHandler) Reschedule(writer http.ResponseWriter, reques
 	writeJSON(writer, http.StatusOK, toTenantBookingDetail(detail))
 }
 
+// Complete handles POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/complete.
+//
+// Empty body: completion is a server-decided state transition (CONFIRMED ->
+// COMPLETED), never a client-supplied status value — the same shape Cancel
+// already uses. The response is the same booking-detail DTO every other
+// method here returns.
+func (h *BookingManagementHandler) Complete(writer http.ResponseWriter, request *http.Request, tenantID string, bookingID string) {
+	detail, err := h.bookings.Complete(request.Context(), tenantID, bookingID)
+	if err != nil {
+		writeSchedulingError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, toTenantBookingDetail(detail))
+}
+
+// NoShow handles POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/no-show.
+//
+// Empty body, mirroring Complete exactly with NO_SHOW as the target status.
+func (h *BookingManagementHandler) NoShow(writer http.ResponseWriter, request *http.Request, tenantID string, bookingID string) {
+	detail, err := h.bookings.MarkNoShow(request.Context(), tenantID, bookingID)
+	if err != nil {
+		writeSchedulingError(writer, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, toTenantBookingDetail(detail))
+}
+
 func optionalQuery(value string) *string {
 	if value == "" {
 		return nil

@@ -169,6 +169,10 @@ func (r *PostgresBookingRepository) ListByTenant(ctx context.Context, tenantID s
 		args = append(args, string(*filter.Status))
 		conditions = append(conditions, fmt.Sprintf("b.status = $%d", len(args)))
 	}
+	if filter.ExcludeStatus != nil {
+		args = append(args, string(*filter.ExcludeStatus))
+		conditions = append(conditions, fmt.Sprintf("b.status != $%d", len(args)))
+	}
 	switch filter.Window {
 	case BookingWindowUpcoming:
 		args = append(args, filter.Now.UTC())
@@ -298,6 +302,31 @@ func (r *PostgresBookingRepository) UpdateSchedule(ctx context.Context, tenantID
 			return nil, false, apperrors.New(apperrors.CodeBookingSlotUnavailable, "the requested time is no longer available", err)
 		}
 		return nil, false, fmt.Errorf("rescheduling booking: %w", err)
+	}
+	return booking, true, nil
+}
+
+// UpdateStatus (S13-BE) transitions a CONFIRMED booking to a terminal status
+// (COMPLETED or NO_SHOW), scoped by id, tenant_id, AND status = 'CONFIRMED' —
+// the identical defense-in-depth shape Cancel and UpdateSchedule use. Returns
+// updated=false (and a nil booking) when no CONFIRMED row matched; the
+// service layer, which has already read the booking once before calling
+// this, turns that into the appropriate idempotent-success or
+// invalid-transition response. There is no exclusion constraint on status
+// alone, so no constraint-violation mapping is needed here — the CHECK
+// constraint (migration 000022) only ever rejects a status value this method
+// never passes it.
+func (r *PostgresBookingRepository) UpdateStatus(ctx context.Context, tenantID string, bookingID string, newStatus model.BookingStatus) (*model.Booking, bool, error) {
+	const query = `UPDATE bookings
+        SET status = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2 AND tenant_id = $3 AND status = 'CONFIRMED'
+        RETURNING ` + bookingColumns
+	booking, err := scanBooking(r.db.QueryRowContext(ctx, query, string(newStatus), bookingID, tenantID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("updating booking status: %w", err)
 	}
 	return booking, true, nil
 }

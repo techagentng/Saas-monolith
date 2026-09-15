@@ -36,6 +36,14 @@ const (
 	// the caller's tenant — whether it never existed or belongs to another
 	// tenant, which are deliberately indistinguishable. Maps to 404.
 	CodeBookingNotFound ErrorCode = "BOOKING_NOT_FOUND"
+	// CodeBookingInvalidTransition (S13-BE) is returned when a booking
+	// lifecycle action (cancel, complete, no-show) cannot be applied given the
+	// booking's CURRENT status (e.g. it is already CANCELLED/COMPLETED/NO_SHOW
+	// in a way that forbids the requested transition) or its point in time
+	// (completing/no-showing a booking whose appointment window has not ended
+	// yet). The request is well-formed; it conflicts with the resource's
+	// current state — a 409, distinct from a 400 malformed request.
+	CodeBookingInvalidTransition ErrorCode = "BOOKING_INVALID_TRANSITION"
 	// Google OAuth / OpenID Connect. These exist because the generic codes
 	// cannot distinguish causes the frontend must present differently: a
 	// denied consent screen is the user's own choice and deserves no alarming

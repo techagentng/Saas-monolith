@@ -33,6 +33,13 @@ type BookingRescheduler interface {
 	UpdateSchedule(ctx context.Context, tenantID string, bookingID string, startAt time.Time, endAt time.Time) (*model.Booking, bool, error)
 }
 
+// BookingStatusUpdater (S13-BE) is the transactional write half of the
+// terminal-status transitions: a single atomic UPDATE gated on the booking
+// still being CONFIRMED in this tenant.
+type BookingStatusUpdater interface {
+	UpdateStatus(ctx context.Context, tenantID string, bookingID string, newStatus model.BookingStatus) (*model.Booking, bool, error)
+}
+
 // BookingView is the S11 dashboard's three-way split, resolved to a
 // (status, time-window) pair before it reaches the repository. It is a closed
 // vocabulary — the dashboard does not offer arbitrary status/date queries.
@@ -153,38 +160,54 @@ type BookingManagementService interface {
 	Cancel(ctx context.Context, tenantID string, bookingID string) (*BookingDetail, error)
 	// Reschedule (S12-BE) moves a CONFIRMED booking to a new date/start,
 	// preserving its id, reference, customer, service and technician. Only a
-	// CONFIRMED booking may be rescheduled — CANCELLED is rejected with a
-	// deterministic domain error. Rescheduling to the booking's own current
-	// slot is a no-op success, the same idempotency convention Cancel
-	// applies to an already-cancelled booking. The new time is validated
-	// through the exact same S7 availability engine public booking creation
-	// uses (service/staff validity, capability, working hours, past-slot
-	// filtering, no-overlap), with that ONE booking's own current interval
-	// excluded from occupancy so it never appears to conflict with itself.
+	// CONFIRMED booking may be rescheduled — CANCELLED, COMPLETED and NO_SHOW
+	// (S13-BE) are all rejected with the same deterministic domain error.
+	// Rescheduling to the booking's own current slot is a no-op success, the
+	// same idempotency convention Cancel applies to an already-cancelled
+	// booking. The new time is validated through the exact same S7
+	// availability engine public booking creation uses (service/staff
+	// validity, capability, working hours, past-slot filtering, no-overlap),
+	// with that ONE booking's own current interval excluded from occupancy so
+	// it never appears to conflict with itself.
 	Reschedule(ctx context.Context, tenantID string, bookingID string, input RescheduleBookingInput) (*BookingDetail, error)
+	// Complete transitions a CONFIRMED booking to COMPLETED (S13-BE). Only
+	// allowed once the booking's appointment window has ended, in the
+	// tenant's own authoritative timezone (current tenant-local time >=
+	// booking.end) — see transitionToTerminal. COMPLETED is terminal:
+	// completing an already-COMPLETED booking is idempotent success (the
+	// Cancel/already-cancelled convention); every other current status
+	// (CANCELLED, NO_SHOW) is a rejected transition.
+	Complete(ctx context.Context, tenantID string, bookingID string) (*BookingDetail, error)
+	// MarkNoShow transitions a CONFIRMED booking to NO_SHOW (S13-BE). Mirrors
+	// Complete exactly, with NO_SHOW as the target: same time-eligibility
+	// rule, same idempotency on NO_SHOW -> NO_SHOW, same rejection of every
+	// other current status.
+	MarkNoShow(ctx context.Context, tenantID string, bookingID string) (*BookingDetail, error)
 }
 
 type bookingManagementService struct {
-	reader       BookingReader
-	canceller    BookingCanceller
-	rescheduler  BookingRescheduler
-	availability AvailabilityService
-	services     AvailabilityServiceReader
-	tenants      TenantTimezoneReader
-	clock        Clock
+	reader        BookingReader
+	canceller     BookingCanceller
+	rescheduler   BookingRescheduler
+	statusUpdater BookingStatusUpdater
+	availability  AvailabilityService
+	services      AvailabilityServiceReader
+	tenants       TenantTimezoneReader
+	clock         Clock
 }
 
 func NewBookingManagementService(
 	reader BookingReader,
 	canceller BookingCanceller,
 	rescheduler BookingRescheduler,
+	statusUpdater BookingStatusUpdater,
 	availabilityEngine AvailabilityService,
 	services AvailabilityServiceReader,
 	tenants TenantTimezoneReader,
 	clock Clock,
 ) BookingManagementService {
 	return &bookingManagementService{
-		reader: reader, canceller: canceller, rescheduler: rescheduler,
+		reader: reader, canceller: canceller, rescheduler: rescheduler, statusUpdater: statusUpdater,
 		availability: availabilityEngine, services: services, tenants: tenants, clock: clock,
 	}
 }
@@ -231,14 +254,21 @@ func (s *bookingManagementService) Cancel(ctx context.Context, tenantID string, 
 	if err != nil {
 		return nil, err
 	}
-	if current.Booking.Status == model.BookingCancelled {
+	switch current.Booking.Status {
+	case model.BookingCancelled:
 		return s.toDetail(ctx, tenantID, current)
+	case model.BookingConfirmed:
+		// Past confirmed bookings are cancellable too — S11 has no
+		// cancellation-window policy, and cancelling a past booking is a
+		// legitimate record correction with no availability effect (a past
+		// slot is already gone from S7).
+	default:
+		// COMPLETED or NO_SHOW (S13-BE): both are terminal outcomes distinct
+		// from cancellation, and neither may be reversed into CANCELLED.
+		return nil, apperrors.New(apperrors.CodeBookingInvalidTransition,
+			"a "+string(current.Booking.Status)+" booking cannot be cancelled", nil)
 	}
 
-	// The only other status is CONFIRMED. Past confirmed bookings are
-	// cancellable too — S11 has no cancellation-window policy, and cancelling
-	// a past booking is a legitimate record correction with no availability
-	// effect (a past slot is already gone from S7).
 	if _, _, err := s.canceller.Cancel(ctx, tenantID, bookingID); err != nil {
 		return nil, err
 	}
@@ -279,9 +309,10 @@ func (s *bookingManagementService) Reschedule(ctx context.Context, tenantID stri
 	if err != nil {
 		return nil, err
 	}
-	// A deterministic domain error for the one non-reschedulable state this
-	// feature defines. There is no COMPLETED/NO_SHOW status in the current
-	// model (see model.BookingStatus), so CANCELLED is the only rejection.
+	// A deterministic domain error for every non-reschedulable state: only a
+	// CONFIRMED booking may move. CANCELLED, COMPLETED and NO_SHOW (S13-BE)
+	// are all rejected identically here — this check predates S13-BE and
+	// already covers its two new terminal statuses with no change needed.
 	if current.Booking.Status != model.BookingConfirmed {
 		return nil, apperrors.New(apperrors.CodeValidationFailed, "only a confirmed booking can be rescheduled", nil)
 	}
@@ -342,6 +373,90 @@ func (s *bookingManagementService) Reschedule(ctx context.Context, tenantID stri
 	return s.toDetail(ctx, tenantID, refreshed)
 }
 
+// Complete transitions a CONFIRMED booking to COMPLETED. See
+// transitionToTerminal for the full rule set.
+func (s *bookingManagementService) Complete(ctx context.Context, tenantID string, bookingID string) (*BookingDetail, error) {
+	return s.transitionToTerminal(ctx, tenantID, bookingID, model.BookingCompleted)
+}
+
+// MarkNoShow transitions a CONFIRMED booking to NO_SHOW. See
+// transitionToTerminal for the full rule set.
+func (s *bookingManagementService) MarkNoShow(ctx context.Context, tenantID string, bookingID string) (*BookingDetail, error) {
+	return s.transitionToTerminal(ctx, tenantID, bookingID, model.BookingNoShow)
+}
+
+// transitionToTerminal (S13-BE) is the shared implementation behind Complete
+// and MarkNoShow — a small, closed rule set, not a general state machine:
+//
+//  1. Resolve the booking (tenant-scoped; missing/cross-tenant is
+//     BOOKING_NOT_FOUND, identical to every other method here).
+//  2. If the booking is ALREADY in the requested target status, return it
+//     as-is with no write — the same idempotency convention Cancel applies
+//     to an already-cancelled booking, so a duplicate owner click is
+//     harmless.
+//  3. Any other non-CONFIRMED status (CANCELLED, or the OTHER terminal
+//     status) is a rejected transition: BOOKING_INVALID_TRANSITION (409).
+//     COMPLETED <-> NO_SHOW is deliberately NOT permitted — the owner must
+//     live with their first terminal choice in this version.
+//  4. Otherwise the booking is CONFIRMED. It is only eligible once its
+//     appointment has ended: current tenant-local time >= booking.end. Both
+//     sides of that comparison are absolute instants, so the comparison
+//     itself is timezone-independent, but resolving the tenant's IANA
+//     timezone first (rather than comparing raw clock.Now() against EndAt
+//     with no tenant context at all) keeps this method visibly authoritative
+//     on tenant time, matching every other eligibility check in this
+//     package (see resolveTenantLocation's other callers). A future booking
+//     is BOOKING_INVALID_TRANSITION (409), not a 400 — the request is
+//     syntactically fine, it is simply too early.
+//  5. Write via BookingStatusUpdater.UpdateStatus (a single UPDATE gated on
+//     status = 'CONFIRMED', the identical shape Cancel/UpdateSchedule use),
+//     then re-read for the fresh row.
+func (s *bookingManagementService) transitionToTerminal(ctx context.Context, tenantID string, bookingID string, target model.BookingStatus) (*BookingDetail, error) {
+	if err := validateBookingIdentifiers(tenantID, bookingID); err != nil {
+		return nil, err
+	}
+
+	current, err := s.reader.FindByTenantAndID(ctx, tenantID, bookingID)
+	if err != nil {
+		return nil, err
+	}
+
+	switch current.Booking.Status {
+	case target:
+		return s.toDetail(ctx, tenantID, current)
+	case model.BookingConfirmed:
+		// proceed below
+	default:
+		return nil, apperrors.New(apperrors.CodeBookingInvalidTransition,
+			"a "+string(current.Booking.Status)+" booking cannot be marked "+string(target), nil)
+	}
+
+	tenant, err := s.tenants.FindByID(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	location, err := resolveTenantLocation(tenant)
+	if err != nil {
+		return nil, err
+	}
+	now := s.clock.Now().In(location)
+	end := current.Booking.EndAt.In(location)
+	if now.Before(end) {
+		return nil, apperrors.New(apperrors.CodeBookingInvalidTransition,
+			"a booking cannot be marked "+string(target)+" before its appointment has ended", nil)
+	}
+
+	if _, _, err := s.statusUpdater.UpdateStatus(ctx, tenantID, bookingID, target); err != nil {
+		return nil, err
+	}
+
+	refreshed, err := s.reader.FindByTenantAndID(ctx, tenantID, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	return s.toDetail(ctx, tenantID, refreshed)
+}
+
 func (s *bookingManagementService) toRepoFilter(ctx context.Context, tenantID string, filter BookingListFilter) (repository.BookingListFilter, error) {
 	out := repository.BookingListFilter{StaffID: trimmedIDOrNil(filter.StaffID), ServiceID: trimmedIDOrNil(filter.ServiceID)}
 	if out.StaffID != nil {
@@ -361,7 +476,11 @@ func (s *bookingManagementService) toRepoFilter(ctx context.Context, tenantID st
 	case BookingViewUpcoming:
 		out.Status, out.Window, out.Now = &confirmed, repository.BookingWindowUpcoming, s.clock.Now()
 	case BookingViewPast:
-		out.Status, out.Window, out.Now = &confirmed, repository.BookingWindowPast, s.clock.Now()
+		// S13-BE: PAST now means every non-CANCELLED booking that has
+		// already started — CONFIRMED (not yet actioned), COMPLETED and
+		// NO_SHOW all belong in the historical view; CANCELLED keeps its own
+		// dedicated view regardless of when it was scheduled for.
+		out.ExcludeStatus, out.Window, out.Now = &cancelled, repository.BookingWindowPast, s.clock.Now()
 	case BookingViewCancelled:
 		out.Status = &cancelled
 	case BookingViewAll:

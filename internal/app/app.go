@@ -253,7 +253,7 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	// serviceRepository the public S10 booking-creation path already
 	// depends on (see bookingService above) — no second scheduling pipeline.
 	bookingManagementService := schedulingservice.NewBookingManagementService(
-		bookingRepository, bookingRepository, bookingRepository,
+		bookingRepository, bookingRepository, bookingRepository, bookingRepository,
 		availabilityService, serviceRepository,
 		tenants, schedulingservice.SystemClock{},
 	)
@@ -732,11 +732,16 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 	//   GET  /api/v1/tenants/{tenantID}/bookings/{bookingID}              TENANT  booking.read
 	//   POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/cancel       TENANT  booking.update
 	//   POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/reschedule   TENANT  booking.update
+	//   POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/complete     TENANT  booking.update
+	//   POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/no-show      TENANT  booking.update
 	// Ordering: Authentication -> Tenant Context -> Authorization -> Handler.
-	// Cancellation and rescheduling both carry booking.update, not a bespoke
-	// code: both change a booking's state, and there is deliberately no
-	// booking.cancel or booking.reschedule permission (S12-BE reuses S11's
-	// own precedent here).
+	// Cancellation, rescheduling, completion and no-show all carry
+	// booking.update, not a bespoke code each: all four change a booking's
+	// state, and there is deliberately no booking.cancel / .reschedule /
+	// .complete / .no_show permission (S12-BE/S13-BE reuse S11's own
+	// precedent here). PAST view (S13-BE, migration 000022) now includes
+	// COMPLETED and NO_SHOW bookings alongside past CONFIRMED ones —
+	// CANCELLED alone keeps its own dedicated view.
 	api.Handle("GET /api/v1/tenants/{tenantID}/bookings", authMiddleware.Wrap(tenantMiddleware.Wrap(
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.read"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -762,6 +767,20 @@ func New(ctx context.Context, cfg config.Config) (*Application, error) {
 		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.update"}.Wrap(
 			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 				bookingManagementHandler.Reschedule(writer, request, request.PathValue("tenantID"), request.PathValue("bookingID"))
+			}),
+		),
+	)))
+	api.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/complete", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				bookingManagementHandler.Complete(writer, request, request.PathValue("tenantID"), request.PathValue("bookingID"))
+			}),
+		),
+	)))
+	api.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/no-show", authMiddleware.Wrap(tenantMiddleware.Wrap(
+		authorization.TenantPermissionMiddleware{Authorizer: authorizer, Permission: "booking.update"}.Wrap(
+			http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				bookingManagementHandler.NoShow(writer, request, request.PathValue("tenantID"), request.PathValue("bookingID"))
 			}),
 		),
 	)))

@@ -102,7 +102,7 @@ func buildBookingManagementRoutes(t *testing.T, scenario *staffScenarioState, te
 	availability := &fakeRouteAvailability{}
 	services := &statefulServiceRepository{services: scenario.services}
 	svc := schedulingservice.NewBookingManagementService(
-		store, store, store,
+		store, store, store, store,
 		availability, services,
 		tenants, frozenClock{now: bmRouteNow},
 	)
@@ -126,6 +126,12 @@ func buildBookingManagementRoutes(t *testing.T, scenario *staffScenarioState, te
 	}))
 	mux.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/reschedule", wrap("booking.update", func(w http.ResponseWriter, r *http.Request) {
 		handler.Reschedule(w, r, r.PathValue("tenantID"), r.PathValue("bookingID"))
+	}))
+	mux.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/complete", wrap("booking.update", func(w http.ResponseWriter, r *http.Request) {
+		handler.Complete(w, r, r.PathValue("tenantID"), r.PathValue("bookingID"))
+	}))
+	mux.Handle("POST /api/v1/tenants/{tenantID}/bookings/{bookingID}/no-show", wrap("booking.update", func(w http.ResponseWriter, r *http.Request) {
+		handler.NoShow(w, r, r.PathValue("tenantID"), r.PathValue("bookingID"))
 	}))
 	return mux, tokens, store, availability
 }
@@ -222,6 +228,37 @@ func TestBookingListReturnsOnlyThisTenantsBookingsForTheView(t *testing.T) {
 	}
 	if rows[0]["service"].(map[string]any)["name"] != "Gel Manicure" || rows[0]["staff"].(map[string]any)["name"] != "Ada" {
 		t.Fatalf("row relations wrong: %v", rows[0])
+	}
+}
+
+// S13-BE: PAST must include COMPLETED and NO_SHOW bookings alongside past
+// CONFIRMED ones, while CANCELLED — regardless of how far in the past it was
+// scheduled for — stays out of PAST and only appears in its own view.
+func TestBookingListPastViewIncludesCompletedAndNoShowButNotCancelled(t *testing.T) {
+	scenario := bookingScenario(t)
+	const bmRouteBookingC = "550e8400-e29b-41d4-a716-4466554f0003"
+	const bmRouteBookingD = "550e8400-e29b-41d4-a716-4466554f0004"
+	pastConfirmed := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(-48*time.Hour))
+	completed := bmRouteBooking(bmRouteBookingB, staffRouteTenantA, schedulingmodel.BookingCompleted, bmRouteNow.Add(-24*time.Hour))
+	noShow := bmRouteBooking(bmRouteBookingC, staffRouteTenantA, schedulingmodel.BookingNoShow, bmRouteNow.Add(-12*time.Hour))
+	cancelled := bmRouteBooking(bmRouteBookingD, staffRouteTenantA, schedulingmodel.BookingCancelled, bmRouteNow.Add(-6*time.Hour))
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, pastConfirmed, completed, noShow, cancelled)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodGet, bookingsPath(staffRouteTenantA)+"?view=past", ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &rows); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, r := range rows {
+		ids[r["id"].(string)] = true
+	}
+	if len(rows) != 3 || !ids[bmRouteBookingA] || !ids[bmRouteBookingB] || !ids[bmRouteBookingC] || ids[bmRouteBookingD] {
+		t.Fatalf("past view = %v, want CONFIRMED/COMPLETED/NO_SHOW present and CANCELLED excluded", rows)
 	}
 }
 
@@ -491,6 +528,119 @@ func TestBookingRescheduleRejectsATargetThatIsNotAnAvailableSlot(t *testing.T) {
 	assertBodyCode(t, rec, "BOOKING_SLOT_UNAVAILABLE")
 	if store.bookings[0].StartAt != original.StartAt {
 		t.Fatal("a rejected reschedule still mutated the booking")
+	}
+}
+
+// --- complete / no-show (S13-BE) ----------------------------------------
+
+func TestBookingCompleteTransitionsAPastConfirmedBooking(t *testing.T) {
+	scenario := bookingScenario(t)
+	past := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(-2*time.Hour))
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, past)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/complete", ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"COMPLETED"`) {
+		t.Fatalf("complete body = %s", rec.Body.String())
+	}
+	if len(store.bookings) != 1 || store.bookings[0].Status != schedulingmodel.BookingCompleted {
+		t.Fatalf("row not preserved-and-completed: %+v", store.bookings)
+	}
+
+	// idempotent second complete
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/complete", ""))
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("idempotent complete status = %d", rec2.Code)
+	}
+}
+
+func TestBookingNoShowTransitionsAPastConfirmedBooking(t *testing.T) {
+	scenario := bookingScenario(t)
+	past := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(-2*time.Hour))
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, past)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/no-show", ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"NO_SHOW"`) {
+		t.Fatalf("no-show body = %s", rec.Body.String())
+	}
+	if len(store.bookings) != 1 || store.bookings[0].Status != schedulingmodel.BookingNoShow {
+		t.Fatalf("row not preserved-and-marked: %+v", store.bookings)
+	}
+}
+
+func TestBookingCompleteRejectsAFutureConfirmedBooking(t *testing.T) {
+	scenario := bookingScenario(t)
+	future := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(2*time.Hour))
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, future)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/complete", ""))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, body = %s, want 409", rec.Code, rec.Body.String())
+	}
+	assertBodyCode(t, rec, "BOOKING_INVALID_TRANSITION")
+	if store.bookings[0].Status != schedulingmodel.BookingConfirmed {
+		t.Fatal("a rejected complete mutated the booking")
+	}
+}
+
+func TestBookingCompleteAndNoShowRejectACancelledBooking(t *testing.T) {
+	scenario := bookingScenario(t)
+	cancelled := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingCancelled, bmRouteNow.Add(-2*time.Hour))
+	handler, tokens, _, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, cancelled)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/complete", ""))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+	assertBodyCode(t, rec, "BOOKING_INVALID_TRANSITION")
+
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/no-show", ""))
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec2.Code)
+	}
+	assertBodyCode(t, rec2, "BOOKING_INVALID_TRANSITION")
+}
+
+func TestBookingCompleteAndNoShowRequireBookingUpdatePermission(t *testing.T) {
+	scenario := bookingScenario(t)
+	past := bmRouteBooking(bmRouteBookingA, staffRouteTenantA, schedulingmodel.BookingConfirmed, bmRouteNow.Add(-2*time.Hour))
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingReadPermissions, past)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/complete", ""))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 without booking.update", rec.Code)
+	}
+	assertBodyCode(t, rec, "PERMISSION_DENIED")
+	if store.bookings[0].Status != schedulingmodel.BookingConfirmed {
+		t.Fatal("a denied complete still mutated the booking")
+	}
+}
+
+func TestBookingCompleteAndNoShowCrossTenantIsNotFound(t *testing.T) {
+	scenario := bookingScenario(t)
+	elsewhere := bmRouteBooking(bmRouteBookingA, staffRouteTenantB, schedulingmodel.BookingConfirmed, bmRouteNow.Add(-2*time.Hour))
+	handler, tokens, store, _ := buildBookingManagementRoutes(t, scenario, bookingManagePermissions, elsewhere)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, staffRequest(t, tokens, http.MethodPost, bookingsPath(staffRouteTenantA)+"/"+bmRouteBookingA+"/complete", ""))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	assertBodyCode(t, rec, "BOOKING_NOT_FOUND")
+	if store.bookings[0].Status != schedulingmodel.BookingConfirmed {
+		t.Fatal("a cross-tenant complete mutated another tenant's booking")
 	}
 }
 

@@ -43,6 +43,13 @@ const (
 type BookingListFilter struct {
 	// Status nil lists every status; a concrete value restricts to it.
 	Status *model.BookingStatus
+	// ExcludeStatus (S13-BE), when set, omits bookings in this one status,
+	// independent of and combinable with Status (though callers use exactly
+	// one of the two in practice). The PAST view uses this rather than
+	// Status to mean "CONFIRMED, COMPLETED or NO_SHOW that has already
+	// started" — every non-CANCELLED terminal outcome belongs in the
+	// historical view, while CANCELLED keeps its own dedicated view.
+	ExcludeStatus *model.BookingStatus
 	// Window, with Now, restricts by appointment start relative to that instant.
 	Window BookingTimeWindow
 	Now    time.Time
@@ -123,4 +130,14 @@ type BookingRepository interface {
 	// its own UPDATE, so no self-exclusion is needed at this layer (only in
 	// the availability CHECK beforehand, which reads other rows).
 	UpdateSchedule(ctx context.Context, tenantID string, bookingID string, startAt time.Time, endAt time.Time) (booking *model.Booking, updated bool, err error)
+
+	// UpdateStatus (S13-BE) transitions a CONFIRMED booking in this tenant to
+	// one terminal status (COMPLETED or NO_SHOW), the same defense-in-depth
+	// WHERE-clause shape Cancel and UpdateSchedule use. Same
+	// (updated=false, nil, nil) convention for "no such CONFIRMED row"
+	// (missing, cross-tenant, or no longer CONFIRMED) — the service layer has
+	// already read the booking once and knows which case applies, including
+	// idempotency (same status requested again) and rejecting the OTHER
+	// terminal status or CANCELLED. It never deletes.
+	UpdateStatus(ctx context.Context, tenantID string, bookingID string, newStatus model.BookingStatus) (booking *model.Booking, updated bool, err error)
 }

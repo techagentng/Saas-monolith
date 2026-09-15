@@ -43,6 +43,16 @@ func (f *fakeBookingManagementService) Reschedule(_ context.Context, tenantID, b
 	return f.detail, f.err
 }
 
+func (f *fakeBookingManagementService) Complete(_ context.Context, tenantID, bookingID string) (*service.BookingDetail, error) {
+	f.tenantID, f.bookingID = tenantID, bookingID
+	return f.detail, f.err
+}
+
+func (f *fakeBookingManagementService) MarkNoShow(_ context.Context, tenantID, bookingID string) (*service.BookingDetail, error) {
+	f.tenantID, f.bookingID = tenantID, bookingID
+	return f.detail, f.err
+}
+
 func sampleSummary() service.BookingSummary {
 	phone := "+2348001112222"
 	return service.BookingSummary{
@@ -157,6 +167,76 @@ func TestBookingCancelErrorMapping(t *testing.T) {
 			h := NewBookingManagementHandler(&fakeBookingManagementService{err: apperrors.New(tc.code, "x", nil)})
 			rec := httptest.NewRecorder()
 			h.Cancel(rec, httptest.NewRequest(http.MethodPost, "/", nil), mgmtTenantID, "x")
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+			assertErrorCode(t, rec, tc.body)
+		})
+	}
+}
+
+// --- complete / no-show (S13-BE) ----------------------------------------
+
+func TestBookingCompleteReturnsUpdatedDetail(t *testing.T) {
+	summary := sampleSummary()
+	summary.Status = model.BookingCompleted
+	fake := &fakeBookingManagementService{detail: &service.BookingDetail{BookingSummary: summary, Timezone: "Africa/Lagos"}}
+	h := NewBookingManagementHandler(fake)
+	rec := httptest.NewRecorder()
+
+	h.Complete(rec, httptest.NewRequest(http.MethodPost, "/", nil), mgmtTenantID, summary.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"COMPLETED"`) {
+		t.Fatalf("complete response = %s", rec.Body.String())
+	}
+	if fake.tenantID != mgmtTenantID || fake.bookingID != summary.ID {
+		t.Fatalf("handler did not forward tenant/booking ids: tenant=%q booking=%q", fake.tenantID, fake.bookingID)
+	}
+}
+
+func TestBookingNoShowReturnsUpdatedDetail(t *testing.T) {
+	summary := sampleSummary()
+	summary.Status = model.BookingNoShow
+	fake := &fakeBookingManagementService{detail: &service.BookingDetail{BookingSummary: summary, Timezone: "Africa/Lagos"}}
+	h := NewBookingManagementHandler(fake)
+	rec := httptest.NewRecorder()
+
+	h.NoShow(rec, httptest.NewRequest(http.MethodPost, "/", nil), mgmtTenantID, summary.ID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"status":"NO_SHOW"`) {
+		t.Fatalf("no-show response = %s", rec.Body.String())
+	}
+}
+
+func TestBookingCompleteAndNoShowErrorMapping(t *testing.T) {
+	for _, tc := range []struct {
+		code apperrors.ErrorCode
+		want int
+		body string
+	}{
+		{apperrors.CodeBookingNotFound, http.StatusNotFound, "BOOKING_NOT_FOUND"},
+		{apperrors.CodeBookingInvalidTransition, http.StatusConflict, "BOOKING_INVALID_TRANSITION"},
+		{apperrors.CodePermissionDenied, http.StatusForbidden, "PERMISSION_DENIED"},
+	} {
+		t.Run("complete/"+string(tc.code), func(t *testing.T) {
+			h := NewBookingManagementHandler(&fakeBookingManagementService{err: apperrors.New(tc.code, "x", nil)})
+			rec := httptest.NewRecorder()
+			h.Complete(rec, httptest.NewRequest(http.MethodPost, "/", nil), mgmtTenantID, "x")
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
+			}
+			assertErrorCode(t, rec, tc.body)
+		})
+		t.Run("no-show/"+string(tc.code), func(t *testing.T) {
+			h := NewBookingManagementHandler(&fakeBookingManagementService{err: apperrors.New(tc.code, "x", nil)})
+			rec := httptest.NewRecorder()
+			h.NoShow(rec, httptest.NewRequest(http.MethodPost, "/", nil), mgmtTenantID, "x")
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
 			}

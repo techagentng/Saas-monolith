@@ -105,6 +105,9 @@ func (r *statefulBookingRepository) ListByTenant(_ context.Context, tenantID str
 		if filter.Status != nil && b.Status != *filter.Status {
 			continue
 		}
+		if filter.ExcludeStatus != nil && b.Status == *filter.ExcludeStatus {
+			continue
+		}
 		switch filter.Window {
 		case schedulingrepository.BookingWindowUpcoming:
 			if b.StartAt.Before(filter.Now) {
@@ -199,6 +202,22 @@ func (r *statefulBookingRepository) UpdateSchedule(_ context.Context, tenantID, 
 	target.UpdatedAt = time.Now().UTC()
 	copied := *target
 	return &copied, true, nil
+}
+
+// UpdateStatus (S13-BE) mirrors Cancel/UpdateSchedule's own WHERE-clause
+// shape: it only ever transitions a CONFIRMED row.
+func (r *statefulBookingRepository) UpdateStatus(_ context.Context, tenantID, bookingID string, newStatus schedulingmodel.BookingStatus) (*schedulingmodel.Booking, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, b := range r.bookings {
+		if b.ID == bookingID && b.TenantID == tenantID && b.Status == schedulingmodel.BookingConfirmed {
+			b.Status = newStatus
+			b.UpdatedAt = time.Now().UTC()
+			copied := *b
+			return &copied, true, nil
+		}
+	}
+	return nil, false, nil
 }
 
 var (

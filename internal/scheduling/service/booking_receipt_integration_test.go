@@ -55,6 +55,7 @@ var brIntegrationMigrations = []string{
 	"000019_create_service_categories.up.sql",
 	"000020_create_service_images.up.sql",
 	"000021_add_booking_receipt_access_token.up.sql",
+	"000022_add_booking_terminal_statuses.up.sql",
 }
 
 var brIntegrationTables = []string{
