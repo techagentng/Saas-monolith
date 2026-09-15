@@ -13,12 +13,24 @@ import (
 // catalog entry nor an actor. S10 only ever writes CONFIRMED; CANCELLED exists
 // (mirrored by the CHECK and the partial exclusion constraint in migration
 // 000016) so S11 can add the transition without a lock-heavy constraint
-// rebuild.
+// rebuild. COMPLETED and NO_SHOW (S13-BE, migration 000022) are the two
+// owner-marked outcomes of a past appointment.
+//
+// All of CANCELLED, COMPLETED and NO_SHOW are terminal: the only transitions
+// this domain defines are CONFIRMED -> CANCELLED, CONFIRMED -> COMPLETED, and
+// CONFIRMED -> NO_SHOW (BookingManagementService owns the rule; there is
+// deliberately no general state-machine type here). Only CONFIRMED counts as
+// active occupancy (bookings_no_overlap's WHERE clause, and OccupiedIntervals'
+// query, both key off status = 'CONFIRMED' alone) — so COMPLETED and NO_SHOW
+// free their interval exactly the way CANCELLED already does, with no change
+// to either.
 type BookingStatus string
 
 const (
 	BookingConfirmed BookingStatus = "CONFIRMED"
 	BookingCancelled BookingStatus = "CANCELLED"
+	BookingCompleted BookingStatus = "COMPLETED"
+	BookingNoShow    BookingStatus = "NO_SHOW"
 )
 
 // Bounds mirror sensible free-text limits. There is no column width on the

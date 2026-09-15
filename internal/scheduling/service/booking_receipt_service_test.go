@@ -165,6 +165,28 @@ func TestGetReceiptRendersACancelledBookingsRealStatus(t *testing.T) {
 	}
 }
 
+// TestGetReceiptRendersTheS13TerminalStatusesPlainly is the S13-BE section 32
+// receipt-compatibility proof: a booking marked COMPLETED or NO_SHOW is
+// still a receipt-eligible lookup (the receipt service has no status gate on
+// GetReceipt — it renders whatever is persisted, exactly like CANCELLED
+// already does above), with no change to the PDF layout or this service.
+func TestGetReceiptRendersTheS13TerminalStatusesPlainly(t *testing.T) {
+	for _, status := range []model.BookingStatus{model.BookingCompleted, model.BookingNoShow} {
+		t.Run(string(status), func(t *testing.T) {
+			f := newReceiptFixture()
+			_, reference := f.confirmedBooking()
+			f.bookings.bookings[receiptToken].Status = status
+
+			if _, err := f.svc.GetReceipt(context.Background(), "glamour-nails", reference, receiptToken); err != nil {
+				t.Fatalf("GetReceipt() error = %v", err)
+			}
+			if f.generator.got.Status != string(status) {
+				t.Fatalf("Status = %q, want %q shown plainly", f.generator.got.Status, status)
+			}
+		})
+	}
+}
+
 // --- access control -----------------------------------------------------
 
 func TestGetReceiptRejectsABlankToken(t *testing.T) {
